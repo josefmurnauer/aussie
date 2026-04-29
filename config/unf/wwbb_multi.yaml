@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /unf
+  - override /dataset: wwbb_multi
+  - _self_
+
+model:
+  net:
+    dim_in: ${dataset.process.num_features}
+    dim_out: 1
+    ensembled: false
+
+training:
+  lr: 5e-3
+  optimizer:
+    warmup_steps: 5000

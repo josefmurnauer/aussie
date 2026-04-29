@@ -1,8 +1,8 @@
 name: zjet_particle
 reader:
   _target_: src.datasets.ZJetParticleData.read
-  path: /remote/gpu02/ore/data/energyflow
-  observables_path: /remote/gpu02/ore/station/data
+  path: /ptmp/mpp/mjosef/data_files
+  observables_path: /ptmp/mpp/mjosef/data_files
 process:
   _target_: src.datasets.ZJetParticleProcess  
   num_features: 4

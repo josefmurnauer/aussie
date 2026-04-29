@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /cls
+  - override /dataset: wwbb_multi
+  - _self_
+data:
+  on_gpu: true
+
+model:
+  net:
+    dim_in: ${dataset.process.num_features}
+    dim_out: 1
+    ensembled: false
+
+training:
+  batch_size: 1024
+  optimizer:
+    warmup_steps: 5000
+    weight_decay: 0.0

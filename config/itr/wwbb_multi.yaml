@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /itr
+  - /cls@cls: wwbb_multi
+  - /unf@unf: wwbb_multi
+  - override /dataset: wwbb_multi
+  - _self_
+
+unf:
+  model:
+    _target_: src.models.OmniFolder

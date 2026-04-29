@@ -1,0 +1,8 @@
+name: wwbb_multi
+reader:
+  _target_: src.datasets.WWbbMultiData.read
+  path: /ptmp/mpp/mjosef/data_files/WbWb_files/bulk_region/h5_files/
+  num: 100000
+process:
+  _target_: src.datasets.WWbbMultiProcess
+  num_features: 6
