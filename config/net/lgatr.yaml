@@ -1,4 +1,3 @@
-
 _target_: src.networks.LGATr
 backbone:
   _target_: lgatr.LGATrSlim

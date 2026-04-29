@@ -1,6 +1,8 @@
 import logging
+import math
 import numpy as np
 import os
+import sys
 import time
 import torch
 import torch.nn as nn
@@ -11,6 +13,77 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Dict
 
 log = logging.getLogger("Trainer")
+
+
+def _format_time(seconds: float) -> str:
+    """Format seconds into a human-readable time string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m{secs:02d}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours}h{mins:02d}m{secs:02d}s"
+
+
+class _StatusBar:
+    """A simple text-based status bar that updates in-place using carriage returns."""
+
+    def __init__(self, description: str = "", total: int = 0, width: int = 40):
+        self.description = description
+        self.total = total
+        self.width = width
+        self.current = 0
+        self.start_time = time.time()
+        self.extra_info = ""
+
+    def update(self, n: int = 1, extra: str = ""):
+        self.current += n
+        if self.extra_info != extra:
+            self.extra_info = extra
+            self._redraw()
+        else:
+            self._redraw()
+
+    def set_total(self, total: int):
+        self.total = total
+        self._redraw()
+
+    def _redraw(self):
+        if self.total == 0:
+            return
+        elapsed = time.time() - self.start_time
+        progress = self.current / self.total
+        filled = int(self.width * progress)
+        bar = "█" * filled + "░" * (self.width - filled)
+
+        # Estimate time remaining
+        if self.current > 0:
+            eta = (elapsed / self.current) * (self.total - self.current) if self.current < self.total else 0
+        else:
+            eta = 0
+
+        line = f"\r[{bar}] {progress*100:5.1f}% | {self.current}/{self.total} | ETA: {_format_time(eta)} | elapsed: {_format_time(elapsed)}"
+        if self.extra_info:
+            line += f" | {self.extra_info}"
+
+        sys.stdout.write(line + " " * 5 + "\r")
+        sys.stdout.flush()
+
+    def close(self):
+        elapsed = time.time() - self.start_time
+        progress = self.current / self.total if self.total > 0 else 0
+        filled = int(self.width * progress)
+        bar = "█" * filled + "░" * (self.width - filled)
+        line = f"\r[{bar}] {progress*100:5.1f}% | {self.current}/{self.total} | elapsed: {_format_time(elapsed)}"
+        if self.extra_info:
+            line += f" | {self.extra_info}"
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
 
 
 class Trainer:
@@ -90,12 +163,23 @@ class Trainer:
             log.info(f"Early stopping patience set to {self.cfg.patience}")
 
         t0_total = time.time()
+
+        # Epoch-level status bar
+        epoch_bar = _StatusBar(description="Epochs", total=num_epochs)
+
+        # Track epoch timing for estimation
+        epoch_times = []
+
         for e in range(num_epochs):
 
             self.epoch = (self.start_epoch or 0) + e
+            t0_epoch = time.time()
 
-            # train
+            # train with batch-level status bar
             self.train_one_epoch()
+
+            t_epoch = time.time() - t0_epoch
+            epoch_times.append(t_epoch)
 
             # validate at given frequency
             if (self.epoch + 1) % self.cfg.validate_freq == 0:
@@ -113,6 +197,7 @@ class Trainer:
                 elif self.cfg.patience:  # early stopping
                     self.patience_counter += 1
                     if self.patience_counter == self.cfg.patience:
+                        epoch_bar.close()
                         log.info(f"Stopping training early at epoch {self.epoch}")
                         break
 
@@ -121,19 +206,26 @@ class Trainer:
                 if (self.epoch + 1) % save_freq == 0 or self.epoch == 0:
                     self.save(tag=self.epoch)
 
-            # estimate training time
-            if e == 0:
-                t0_epoch = time.time()
-            if e == 1:
-                dtEst = (time.time() - t0_epoch) * num_epochs
-                log.info(
-                    f"Training time estimate: {dtEst/60:.2f} min = {dtEst/60**2:.2f} h"
-                )
+            # Build extra info string with loss and time estimate
+            train_loss = self.epoch_train_losses[-1]
+            extra_parts = [f"train_loss: {train_loss:.4f}"]
+
+            # Estimate total training time using average of recent epochs
+            if len(epoch_times) >= 2:
+                avg_epoch_time = np.mean(epoch_times[-min(5, len(epoch_times)):])
+                epochs_remaining = num_epochs - self.current_epoch - 1 if hasattr(self, 'current_epoch') else num_epochs - (e + 1)
+                eta_total = avg_epoch_time * epochs_remaining
+                extra_parts.append(f"ETA: {_format_time(eta_total)}")
+
+            extra_info = " | ".join(extra_parts)
+            epoch_bar.update(extra=extra_info)
+            self.current_epoch = e
+
+        epoch_bar.close()
 
         traintime = time.time() - t0_total
         log.info(
-            f"Finished training {self.epoch + 1} epochs after {traintime:.2f} s"
-            f" = {traintime / 60:.2f} min = {traintime / 60 ** 2:.2f} h."
+            f"Finished training {self.epoch + 1} epochs after {_format_time(traintime)}."
         )
 
         # save final model
@@ -152,6 +244,10 @@ class Trainer:
 
         # create list to save loss per iteration
         train_losses = []
+
+        # Batch-level status bar
+        steps_per_epoch = len(self.dataloaders["train"])
+        batch_bar = _StatusBar(description=f"Epoch {self.epoch+1}", total=steps_per_epoch, width=30)
 
         # iterate batch wise over input
         for itr, batch in enumerate(self.dataloaders["train"]):
@@ -180,6 +276,13 @@ class Trainer:
 
             # track loss
             train_losses.append(loss.detach())
+
+            # Update batch status bar periodically
+            if itr % max(1, steps_per_epoch // 20) == 0 or itr == steps_per_epoch - 1:
+                batch_loss_val = float(loss.detach().cpu())
+                extra_info = f"loss: {batch_loss_val:.4f}"
+                batch_bar.update(extra=extra_info)
+
             if self.cfg.use_tensorboard and (not step % self.cfg.log_iters) or not step:
                 iter_loss = torch.stack(train_losses[-self.cfg.log_iters :])
                 self.summarizer.add_scalar(
@@ -194,6 +297,8 @@ class Trainer:
                         step,
                     )
                 self.model.log_buffer.clear()
+
+        batch_bar.close()
 
         # track loss
         self.epoch_train_losses = np.append(

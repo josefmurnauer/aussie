@@ -24,6 +24,7 @@ class Observable:
     xlims: Optional[Tuple[float]] = None
     logx: bool = False
     logy: bool = False
+    log_bins: bool = True
     discrete: bool = False
     unit: Optional[str] = None
 

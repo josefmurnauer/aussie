@@ -76,10 +76,21 @@ class ClassificationExperiment(TrainingExperiment):
             )
             lw_x_sim += lw_sample_sim.numpy()
 
-        if (lw_sample_exp := test_set[:].sample_logweights) is not None:  # exp weights
-            exp_weights = lw_sample_exp[mask_dat].exp().numpy()
+        sample_logweights = test_set[:].sample_logweights
+        if sample_logweights is not None:
+
+            lw_sample = sample_logweights.numpy()   # [N_test]  all events
+            # MC sample weights to add to classifier output
+            lw_mc_sample  = lw_sample[mask_sim.numpy()]   # [N_sim]
+            lw_x_sim     += lw_mc_sample                  # log space addition
+            sim_weights     = np.exp(lw_mc_sample)          # linear for reweighting
+
+            # data sample weights for plotting data histogram
+            lw_dat_sample = lw_sample[mask_dat.numpy()]   # [N_dat]
+            exp_weights   = np.exp(lw_dat_sample)         # linear for plotting
         else:
             exp_weights = None
+            sim_weights = None
 
         # latents
         self.log.info("Plotting part latents")
@@ -91,21 +102,46 @@ class ClassificationExperiment(TrainingExperiment):
             z_sim = test_set[:].aux_z[mask_sim]
         with PdfPages(os.path.join(savedir, "latents.pdf")) as pdf:
             for obs in self.process.observables_z:
+                # --- linear bins ---
                 fig, ax = plotting.plot_reweighting(
                     exp=obs.compute(z_dat).numpy(),
                     sim=obs.compute(z_sim).numpy(),
                     weights_list=[np.exp(lw_x_sim)],
                     variance_list=[None],
                     names_list=["Classifier"],
-                    # xlabel=pcfg.obs_labels[i],
                     xlabel=obs.label,
-                    figsize=np.array([1, 5 / 6]) * pw / 2,
+                    figsize=np.array([1, 7 / 8]) * pw / 2,
                     num_bins=pcfg.num_bins,
                     discrete=obs.discrete,
+                    log_bins=obs.log_bins,
                     logy=obs.logy,
                     qlims=obs.qlims,
                     xlims=obs.xlims,
+                    name_exp="Pseudo-Data",
                     exp_weights=exp_weights,
+                    sim_weights=sim_weights,
+                )
+                pdf.savefig(fig)
+                plt.close(fig)
+                # --- log bins ---
+                fig, ax = plotting.plot_reweighting(
+                    exp=obs.compute(z_dat).numpy(),
+                    sim=obs.compute(z_sim).numpy(),
+                    weights_list=[np.exp(lw_x_sim)],
+                    variance_list=[None],
+                    names_list=["Classifier"],
+                    xlabel=obs.label,
+                    figsize=np.array([1, 7 / 8]) * pw / 2,
+                    num_bins=pcfg.num_bins,
+                    discrete=False,
+                    log_bins=True,
+                    logx=True,
+                    logy=obs.logy,
+                    qlims=obs.qlims,
+                    xlims=obs.xlims,
+                    name_exp="Pseudo-Data",
+                    exp_weights=exp_weights,
+                    sim_weights=sim_weights,
                 )
                 pdf.savefig(fig)
                 plt.close(fig)
@@ -120,21 +156,46 @@ class ClassificationExperiment(TrainingExperiment):
             x_sim = test_set[:].aux_x[mask_sim]
         with PdfPages(os.path.join(savedir, "observables.pdf")) as pdf:
             for obs in self.process.observables_x:
+                # --- linear bins ---
                 fig, ax = plotting.plot_reweighting(
                     exp=obs.compute(x_dat).numpy(),
                     sim=obs.compute(x_sim).numpy(),
                     weights_list=[np.exp(lw_x_sim)],
                     variance_list=[None],
                     names_list=["Classifier"],
-                    # xlabel=pcfg.obs_labels[i],
                     xlabel=obs.label,
-                    figsize=np.array([1, 5 / 6]) * pw / 2,
+                    figsize=np.array([1, 7 / 8]) * pw / 2,
                     num_bins=pcfg.num_bins,
                     discrete=obs.discrete,
+                    log_bins=obs.log_bins,
                     logy=obs.logy,
                     qlims=obs.qlims,
                     xlims=obs.xlims,
+                    name_exp="Pseudo-Data",
                     exp_weights=exp_weights,
+                    sim_weights=sim_weights,
+                )
+                pdf.savefig(fig)
+                plt.close(fig)
+                # --- log bins ---
+                fig, ax = plotting.plot_reweighting(
+                    exp=obs.compute(x_dat).numpy(),
+                    sim=obs.compute(x_sim).numpy(),
+                    weights_list=[np.exp(lw_x_sim)],
+                    variance_list=[None],
+                    names_list=["Classifier"],
+                    xlabel=obs.label,
+                    figsize=np.array([1, 7 / 8]) * pw / 2,
+                    num_bins=pcfg.num_bins,
+                    discrete=False,
+                    log_bins=True,
+                    logx=True,
+                    logy=obs.logy,
+                    qlims=obs.qlims,
+                    xlims=obs.xlims,
+                    name_exp="Pseudo-Data",
+                    exp_weights=exp_weights,
+                    sim_weights=sim_weights,
                 )
                 pdf.savefig(fig)
                 plt.close(fig)
@@ -155,10 +216,12 @@ class ClassificationExperiment(TrainingExperiment):
                 weights_list=[wx],
                 variance_list=[None],
                 names_list=["Classifier"],
-                figsize=np.array([1, 5 / 6]) * pw / 2,
+                figsize=np.array([1, 7 / 8]) * pw / 2,
                 num_bins=pcfg.num_bins,
                 discrete=obs.discrete,
+                name_exp="Pseudo-Data",
                 exp_weights=exp_weights,
+                sim_weights=sim_weights,
                 xlabel=r"$\log R_\theta(x)$",
                 logy=True,
                 qlims=(1e-5, 1 - 1e-5),

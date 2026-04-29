@@ -14,7 +14,7 @@ model:
   norm: l1
   joint_ensembling: false
   norm_target: false
-  cls_path: ???
+  cls_path: /scratch/mjosef/Unfolding/aussie/runs/classify_wwbb_multi/2026-04-29_16-04-43
   kernel_p: 2
   kernel_scale: 1
 
