@@ -1,0 +1,41 @@
+Bootstrap: docker
+# For most applications, the Ubuntu base image should work:
+From: nvidia/cuda:12.8.0-devel-ubuntu22.04
+# For GPU codes, CUDA-enabled base images are provided by NVIDIA, e.g.
+#From: nvidia/cuda:11.8.0-devel-ubuntu22.04
+Stage: build
+
+%files
+    # Copy 'env.yaml' into the image at build time
+    env.yaml
+
+%environment
+    export LC_ALL=C
+    # Set any environment variables you might need during execution.
+    # Add the executables of the Conda environment to PATH
+    export PATH=/opt/conda/envs/myenv/bin:$PATH
+    export HYDRA_FULL_ERROR=1
+    export MKL_THREADING_LAYER=GNU
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    touch /etc/pythonstart
+    apt update && apt --yes install wget git && apt clean
+    # Install a Conda base environment using Miniforge3
+    wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+    mkdir -p /opt/conda
+    bash Miniforge3-Linux-x86_64.sh -b -f -p /opt/conda
+    . /opt/conda/bin/activate
+    # Create the Conda environment:
+    mkdir -p /opt/conda/envs/myenv
+    conda env create -f env.yaml -p /opt/conda/envs/myenv
+    # Clean up
+    conda clean --all --yes
+    rm -vf env.yaml Miniforge3-Linux-x86_64.sh
+
+%runscript
+    # Run the Python interpreter when the image is executed
+    python3 "$@"
+
+
+
