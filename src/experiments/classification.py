@@ -117,7 +117,7 @@ class ClassificationExperiment(TrainingExperiment):
                     logy=obs.logy,
                     qlims=obs.qlims,
                     xlims=obs.xlims,
-                    name_exp="Pseudo-Data",
+                    name_exp="Herwig Pseudo-Data",
                     exp_weights=exp_weights,
                     sim_weights=sim_weights,
                 )
@@ -139,7 +139,7 @@ class ClassificationExperiment(TrainingExperiment):
                     logy=obs.logy,
                     qlims=obs.qlims,
                     xlims=obs.xlims,
-                    name_exp="Pseudo-Data",
+                    name_exp="Herwig Pseudo-Data",
                     exp_weights=exp_weights,
                     sim_weights=sim_weights,
                 )
@@ -171,7 +171,7 @@ class ClassificationExperiment(TrainingExperiment):
                     logy=obs.logy,
                     qlims=obs.qlims,
                     xlims=obs.xlims,
-                    name_exp="Pseudo-Data",
+                    name_exp="Herwig Pseudo-Data",
                     exp_weights=exp_weights,
                     sim_weights=sim_weights,
                 )
@@ -193,7 +193,7 @@ class ClassificationExperiment(TrainingExperiment):
                     logy=obs.logy,
                     qlims=obs.qlims,
                     xlims=obs.xlims,
-                    name_exp="Pseudo-Data",
+                    name_exp="Herwig Pseudo-Data",
                     exp_weights=exp_weights,
                     sim_weights=sim_weights,
                 )
@@ -219,7 +219,7 @@ class ClassificationExperiment(TrainingExperiment):
                 figsize=np.array([1, 7 / 8]) * pw / 2,
                 num_bins=pcfg.num_bins,
                 discrete=obs.discrete,
-                name_exp="Pseudo-Data",
+                name_exp="Herwig Pseudo-Data",
                 exp_weights=exp_weights,
                 sim_weights=sim_weights,
                 xlabel=r"$\log R_\theta(x)$",

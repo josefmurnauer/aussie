@@ -5,7 +5,7 @@ from scipy.stats import binned_statistic
 
 try:
     from atlasify import atlasify
-    HAS_ATLASIFY = True
+    HAS_ATLASIFY = False
 except ImportError:
     HAS_ATLASIFY = False
     print("WARNING: atlasify not installed. ATLAS labels will be skipped.")
@@ -136,8 +136,8 @@ def plot_reweighting(
     qlims=(0.005, 0.995),
     xlims=None,
     quantiles_from_sim=False,
-    name_exp="Data",
-    name_sim="Sim",
+    name_exp="Herwig Pseudo-Data",
+    name_sim="MC Simulation Pythia",
     show_sim=True,
     denom_idx=0,
     ratio_lims=(0.85, 1.15),
@@ -386,8 +386,8 @@ def plot_reweighting_ensemble(
     qlims=(0.005, 0.995),
     xlims=None,
     quantiles_from_sim=False,
-    name_exp="Data",
-    name_sim="Sim",
+    name_exp="Herwig Pseudo-Data",
+    name_sim="MC Simulation Pythia",
     show_sim=True,
     denom_idx=0,
     ratio_lims=(0.85, 1.15),
@@ -601,8 +601,8 @@ def plot_reweighting_multi_ratio(
     qlims=(0.005, 0.995),
     xlims=None,
     quantiles_from_sim=False,
-    name_exp="Data",
-    name_sim="Sim",
+    name_exp="Herwig Pseudo-Data",
+    name_sim="MC Simulation Pythia",
     show_sim=True,
     denom_idx=0,
     ratio_lims=(0.85, 1.15),
