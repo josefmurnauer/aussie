@@ -1,4 +1,4 @@
-# This branch is for Guillem's side project
+## This branch is for Guillem's side project
 # AUSSIE — Adversary-free Unfolding SanS Iteration or Emulation
 
 AUSSIE is a non-iterative, discriminative method for unbinned unfolding of multidimensional collider observables. It reweights a simulated reference dataset to correct for detector effects without requiring iterations, adversarial training, or surrogate forward models.
