@@ -1,7 +1,9 @@
 name: wwbb
 reader:
   _target_: src.datasets.WWbbData.read
-  path: /ptmp/mpp/mjosef/data_files/WbWb_files/bulk_region/converted_files/
+  path_sim: /scratch/mjosef/Unfolding/aussie/data/sim
+  path_data: /scratch/mjosef/Unfolding/aussie/data/pseudodata
+  max_jets: 6
+  num: 3000000
 process:
   _target_: src.datasets.WWbbProcess
-  num_features: 16

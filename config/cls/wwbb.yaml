@@ -8,29 +8,22 @@ defaults:
 data:
   on_gpu: true
 
-dataset:
-  reader:
-    path_data: '/ptmp/mpp/mjosef/data_files/WbWb_files/bulk_region/converted_files/df_herwig_ttbar_singletop_DR_train.h5'
-    path_mc: '/ptmp/mpp/mjosef/data_files/WbWb_files/bulk_region/converted_files/df_pythia_ttbar_train.h5'
-    num: null
-    max_particles_gen: null
-  process:
-    _target_: src.datasets.WWbbProcess
-
 model:
   net:
     backbone:
       in_v_channels: 1
-      in_s_channels: 4 # one hot pid
-      hidden_v_channels: 8
+      in_s_channels: 7    # is_mu, is_met, is_jet, GN2_pb, GN2_pc, GN2_pu, GN2_ptau
+      hidden_v_channels: 16
       hidden_s_channels: 32
+      out_s_channels: 32   # explicit -- avoids broken ${net.backbone.hidden_s_channels}
       num_blocks: 4
       num_heads: 4
-      compile: True
+    head:
+      dim_in: 32            # explicit -- avoids broken ${net.backbone.out_s_channels}
+      hidden_channels: 32    # explicit -- avoids broken ${net.backbone.out_s_channels}
 
 training:
   batch_size: 512
-  test_batch_size: 4096
   optimizer:
     warmup_steps: 5000
-    weight_decay: 0.0    
+    weight_decay: 0.0
