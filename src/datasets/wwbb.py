@@ -235,27 +235,36 @@ class WWbbData(UnfoldingData):
         path_data: Union[str, List[str]],
         max_jets: int = 10,
         device: Optional[torch.device] = None,
-        num: Optional[int] = None,
+        num_sim: Optional[int] = None,
+        num_data: Optional[int] = None,
+        num: Optional[int] = None,  
     ):
+        if num is not None:
+            if num_sim is None:
+                num_sim = num
+            if num_data is None:
+                num_data = num
+
         batch_size = 0
         tensor_kwargs = defaultdict(list)
         n_tokens = 2 + max_jets
 
-        for i, path in enumerate((path_sim, path_data)):
-
+        for i, (path, num) in enumerate(
+            ((path_sim, num_sim), (path_data, num_data))
+        ):
             paths = _resolve_paths(path)
-            log.info(f"[{'sim' if i == 0 else 'pseudodata'}] "
-                      f"reading {len(paths)} parquet file(s) from {path}")
+            label = "sim" if i == 0 else "pseudodata"
+            log.info(f"[{label}] reading {len(paths)} parquet file(s) from {path}")
 
+            # both sim AND pseudodata have particle-level branches
+            # (Herwig is MC, so it has full truth information just like Pythia)
             columns = _needed_columns(RECO_BRANCHES, include_weight=True)
-            if i == 0:
-                columns += _needed_columns(PARTICLE_BRANCHES)
+            columns += _needed_columns(PARTICLE_BRANCHES)
             columns = list(dict.fromkeys(columns))
 
             arrays = _load_arrays(paths, columns, num=num)
             n_events = len(arrays)
-            log.info(f"[{'sim' if i == 0 else 'pseudodata'}] "
-                      f"loaded {n_events} events")
+            log.info(f"[{label}] loaded {n_events} events")
 
             # ---------------- RECO LEVEL ----------------
             features_x, mask_x = _build_tokens(
@@ -264,6 +273,7 @@ class WWbbData(UnfoldingData):
             tensor_kwargs["x"].append(features_x)
             tensor_kwargs["mask_x"].append(mask_x)
 
+            # event weights
             weight_branch = RECO_BRANCHES["weight"]
             if weight_branch in arrays.fields:
                 w = ak.to_numpy(arrays[weight_branch]).astype(np.float32)
@@ -272,18 +282,17 @@ class WWbbData(UnfoldingData):
             logw = np.log(np.abs(w) + 1e-12)
             tensor_kwargs["sample_logweights"].append(torch.from_numpy(logw).float())
 
-            # ---------------- PARTICLE LEVEL (sim only) ----------------
-            if i == 0:
-                features_z, mask_z = _build_tokens(
-                    arrays, PARTICLE_BRANCHES, max_jets, n_events, include_tagging=False,
-                )
-            else:
-                n_scalars_z = 3
-                features_z = torch.zeros((n_events, n_tokens, 4 + n_scalars_z))
-                mask_z = torch.zeros((n_events, n_tokens), dtype=torch.bool)
-
+            # ---------------- PARTICLE LEVEL (both sim and pseudodata) ----------------
+            # Herwig pseudodata is MC -- it has full particle-level truth information
+            # just like Pythia sim. We read it for both populations so that
+            # classification.py's plot() can compare z_sim vs z_dat correctly,
+            # exactly mirroring the wwbb_multi.py approach.
+            features_z, mask_z = _build_tokens(
+                arrays, PARTICLE_BRANCHES, max_jets, n_events, include_tagging=False,
+            )
             tensor_kwargs["z"].append(features_z)
             tensor_kwargs["mask_z"].append(mask_z)
+
             tensor_kwargs["labels"].append(
                 torch.full((n_events,), i, dtype=torch.float32)
             )
@@ -323,6 +332,7 @@ class WWbbProcess:
     transforms: Tuple[Callable] = (WWbbTransform(),)
 
     observables_x: Tuple[Observable] = (
+        # ---- muon ----
         Observable(
             name="mu_pt",
             compute=lambda x: torch.sqrt(x[..., 0, 1] ** 2 + x[..., 0, 2] ** 2),
@@ -330,27 +340,93 @@ class WWbbProcess:
             qlims=(1e-3, 1 - 1e-3),
         ),
         Observable(
+            name="mu_eta",
+            compute=lambda x: torch.arctanh(
+                x[..., 0, 3] / torch.sqrt(x[..., 0, 1] ** 2 + x[..., 0, 2] ** 2 + x[..., 0, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"$\eta_{\mu}$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="mu_e",
+            compute=lambda x: x[..., 0, 0],
+            label=r"$E_{\mu}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- leading jet ----
+        Observable(
+            name="j1_pt",
+            compute=lambda x: torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2),
+            label=r"Leading jet $p_T$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        Observable(
+            name="j1_eta",
+            compute=lambda x: torch.arctanh(
+                x[..., 2, 3] / torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2 + x[..., 2, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"Leading jet $\eta$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="j1_e",
+            compute=lambda x: x[..., 2, 0],
+            label=r"Leading jet $E$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- subleading jet ----
+        Observable(
+            name="j2_pt",
+            compute=lambda x: torch.sqrt(x[..., 3, 1] ** 2 + x[..., 3, 2] ** 2),
+            label=r"Subleading jet $p_T$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        Observable(
+            name="j2_eta",
+            compute=lambda x: torch.arctanh(
+                x[..., 3, 3] / torch.sqrt(x[..., 3, 1] ** 2 + x[..., 3, 2] ** 2 + x[..., 3, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"Subleading jet $\eta$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="j2_e",
+            compute=lambda x: x[..., 3, 0],
+            label=r"Subleading jet $E$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- third leading jet ----
+        Observable(
+            name="j3_pt",
+            compute=lambda x: torch.sqrt(x[..., 4, 1] ** 2 + x[..., 4, 2] ** 2),
+            label=r"3rd jet $p_T$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        Observable(
+            name="j3_eta",
+            compute=lambda x: torch.arctanh(
+                x[..., 4, 3] / torch.sqrt(x[..., 4, 1] ** 2 + x[..., 4, 2] ** 2 + x[..., 4, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"3rd jet $\eta$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="j3_e",
+            compute=lambda x: x[..., 4, 0],
+            label=r"3rd jet $E$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- MET (kept as a useful cross-check) ----
+        Observable(
             name="met",
             compute=lambda x: x[..., 1, 0],
             label=r"$E_T^{\text{miss}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
         ),
-        Observable(
-            name="n_jets",
-            compute=lambda x: (x[..., 2:, 0] > 0).sum(-1),
-            label=r"$N_{\text{jets}}$",
-            discrete=1,
-            xlims=(0, 12),
-        ),
-        Observable(
-            name="leading_jet_pt",
-            compute=lambda x: torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2),
-            label=r"Leading jet $p_T$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-        ),
     )
 
     observables_z: Tuple[Observable] = (
+        # ---- muon (truth) ----
         Observable(
             name="mu_pt_truth",
             compute=lambda z: torch.sqrt(z[..., 0, 1] ** 2 + z[..., 0, 2] ** 2),
@@ -358,16 +434,87 @@ class WWbbProcess:
             qlims=(1e-3, 1 - 1e-3),
         ),
         Observable(
+            name="mu_eta_truth",
+            compute=lambda z: torch.arctanh(
+                z[..., 0, 3] / torch.sqrt(z[..., 0, 1] ** 2 + z[..., 0, 2] ** 2 + z[..., 0, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"$\eta_{\mu}^{\text{truth}}$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="mu_e_truth",
+            compute=lambda z: z[..., 0, 0],
+            label=r"$E_{\mu}^{\text{truth}}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- leading jet (truth) ----
+        Observable(
+            name="j1_pt_truth",
+            compute=lambda z: torch.sqrt(z[..., 2, 1] ** 2 + z[..., 2, 2] ** 2),
+            label=r"Leading jet $p_T^{\text{truth}}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        Observable(
+            name="j1_eta_truth",
+            compute=lambda z: torch.arctanh(
+                z[..., 2, 3] / torch.sqrt(z[..., 2, 1] ** 2 + z[..., 2, 2] ** 2 + z[..., 2, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"Leading jet $\eta^{\text{truth}}$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="j1_e_truth",
+            compute=lambda z: z[..., 2, 0],
+            label=r"Leading jet $E^{\text{truth}}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- subleading jet (truth) ----
+        Observable(
+            name="j2_pt_truth",
+            compute=lambda z: torch.sqrt(z[..., 3, 1] ** 2 + z[..., 3, 2] ** 2),
+            label=r"Subleading jet $p_T^{\text{truth}}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        Observable(
+            name="j2_eta_truth",
+            compute=lambda z: torch.arctanh(
+                z[..., 3, 3] / torch.sqrt(z[..., 3, 1] ** 2 + z[..., 3, 2] ** 2 + z[..., 3, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"Subleading jet $\eta^{\text{truth}}$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="j2_e_truth",
+            compute=lambda z: z[..., 3, 0],
+            label=r"Subleading jet $E^{\text{truth}}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- third leading jet (truth) ----
+        Observable(
+            name="j3_pt_truth",
+            compute=lambda z: torch.sqrt(z[..., 4, 1] ** 2 + z[..., 4, 2] ** 2),
+            label=r"3rd jet $p_T^{\text{truth}}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3),
+        ),
+        Observable(
+            name="j3_eta_truth",
+            compute=lambda z: torch.arctanh(
+                z[..., 4, 3] / torch.sqrt(z[..., 4, 1] ** 2 + z[..., 4, 2] ** 2 + z[..., 4, 3] ** 2).clamp(min=1e-8)
+            ),
+            label=r"3rd jet $\eta^{\text{truth}}$",
+            xlims=(-5, 5),
+        ),
+        Observable(
+            name="j3_e_truth",
+            compute=lambda z: z[..., 4, 0],
+            label=r"3rd jet $E^{\text{truth}}$ [GeV]",
+            xlims=(1e-3, 1 - 1e-3),
+        ),
+        # ---- MET (truth) ----
+        Observable(
             name="met_truth",
             compute=lambda z: z[..., 1, 0],
             label=r"$E_T^{\text{miss,truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
-        ),
-        Observable(
-            name="n_jets_truth",
-            compute=lambda z: (z[..., 2:, 0] > 0).sum(-1),
-            label=r"$N_{\text{jets}}^{\text{truth}}$",
-            discrete=1,
-            xlims=(0, 12),
         ),
     )
