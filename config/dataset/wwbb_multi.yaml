@@ -1,8 +1,12 @@
 name: wwbb_multi
 reader:
   _target_: src.datasets.WWbbMultiData.read
-  path: /ptmp/mpp/mjosef/data_files/WbWb_files/bulk_region/h5_files/
-  num: 100000
+  path_sim: /scratch/mjosef/Unfolding/aussie/data/sim
+  path_data: /scratch/mjosef/Unfolding/aussie/data/pseudodata
+  num_sim: 1000000
+  num_data: 400000
+  normalize: false
+  seed: 42
 process:
   _target_: src.datasets.WWbbMultiProcess
-  num_features: 6
+  num_features: 5
