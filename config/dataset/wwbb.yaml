@@ -4,6 +4,9 @@ reader:
   path_sim: /scratch/mjosef/Unfolding/aussie/data/sim
   path_data: /scratch/mjosef/Unfolding/aussie/data/pseudodata
   max_jets: 6
-  num: 3000000
+  num_sim: 2000000
+  num_data: 2000000
+  normalize: false
+  seed: 42
 process:
   _target_: src.datasets.WWbbProcess

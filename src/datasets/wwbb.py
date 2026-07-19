@@ -5,7 +5,6 @@ import os
 import awkward as ak
 import numpy as np
 import torch
-
 from collections import defaultdict
 from dataclasses import dataclass
 from tensordict import tensorclass
@@ -207,17 +206,38 @@ def _needed_columns(branch_map, include_weight=False):
     return cols
 
 
-def _load_arrays(paths, columns, num=None):
+def _load_arrays(paths, columns, num=None, seed=42):
     """Load one or more parquet files as a single Awkward Array,
-    optionally truncating to the first `num` events overall."""
+    optionally drawing a random subset of `num` events uniformly
+    across ALL files rather than taking the first `num` events.
+
+    Random sampling ensures all DSIDs (e.g. ttbar + singletop) are
+    proportionally represented even when num << total events.
+    """
     if len(paths) == 1:
         arrays = ak.from_parquet(paths[0], columns=columns)
     else:
         arrays = ak.concatenate(
             [ak.from_parquet(p, columns=columns) for p in paths]
         )
-    if num is not None:
-        arrays = arrays[:num]
+
+    total = len(arrays)
+
+    if num is not None and num < total:
+        rng = np.random.default_rng(seed)
+        indices = rng.choice(total, size=num, replace=False)
+        indices.sort()  # sorted access is much faster for parquet/awkward
+        arrays = arrays[indices]
+        log.info(
+            f"  randomly sampled {num} / {total} events "
+            f"(seed={seed})"
+        )
+    elif num is not None and num >= total:
+        log.info(
+            f"  requested {num} events but only {total} available "
+            f"-- using all events"
+        )
+
     return arrays
 
 
@@ -233,12 +253,15 @@ class WWbbData(UnfoldingData):
         cls,
         path_sim: Union[str, List[str]],
         path_data: Union[str, List[str]],
-        max_jets: int = 10,
+        max_jets: int = 6,
         device: Optional[torch.device] = None,
         num_sim: Optional[int] = None,
         num_data: Optional[int] = None,
-        num: Optional[int] = None,  
+        num: Optional[int] = None,       # backwards compatibility
+        normalize: bool = False,
+        seed: int = 42,                   # random sampling seed
     ):
+        # backwards compatibility
         if num is not None:
             if num_sim is None:
                 num_sim = num
@@ -248,25 +271,24 @@ class WWbbData(UnfoldingData):
         batch_size = 0
         tensor_kwargs = defaultdict(list)
         n_tokens = 2 + max_jets
+        raw_weights = []
 
-        for i, (path, num) in enumerate(
+        for i, (path, num_i) in enumerate(
             ((path_sim, num_sim), (path_data, num_data))
         ):
             paths = _resolve_paths(path)
             label = "sim" if i == 0 else "pseudodata"
             log.info(f"[{label}] reading {len(paths)} parquet file(s) from {path}")
 
-            # both sim AND pseudodata have particle-level branches
-            # (Herwig is MC, so it has full truth information just like Pythia)
             columns = _needed_columns(RECO_BRANCHES, include_weight=True)
             columns += _needed_columns(PARTICLE_BRANCHES)
             columns = list(dict.fromkeys(columns))
 
-            arrays = _load_arrays(paths, columns, num=num)
+            arrays = _load_arrays(paths, columns, num=num_i, seed=seed)
             n_events = len(arrays)
             log.info(f"[{label}] loaded {n_events} events")
 
-            # ---------------- RECO LEVEL ----------------
+            # RECO LEVEL
             features_x, mask_x = _build_tokens(
                 arrays, RECO_BRANCHES, max_jets, n_events, include_tagging=True,
             )
@@ -279,14 +301,9 @@ class WWbbData(UnfoldingData):
                 w = ak.to_numpy(arrays[weight_branch]).astype(np.float32)
             else:
                 w = np.ones(n_events, dtype=np.float32)
-            logw = np.log(np.abs(w) + 1e-12)
-            tensor_kwargs["sample_logweights"].append(torch.from_numpy(logw).float())
+            raw_weights.append(w)
 
-            # ---------------- PARTICLE LEVEL (both sim and pseudodata) ----------------
-            # Herwig pseudodata is MC -- it has full particle-level truth information
-            # just like Pythia sim. We read it for both populations so that
-            # classification.py's plot() can compare z_sim vs z_dat correctly,
-            # exactly mirroring the wwbb_multi.py approach.
+            # PARTICLE LEVEL
             features_z, mask_z = _build_tokens(
                 arrays, PARTICLE_BRANCHES, max_jets, n_events, include_tagging=False,
             )
@@ -298,6 +315,32 @@ class WWbbData(UnfoldingData):
             )
 
             batch_size += n_events
+
+        # NORMALIZATION
+        if normalize:
+            w_sim_raw, w_data_raw = raw_weights[0], raw_weights[1]
+            sum_sim  = np.abs(w_sim_raw).sum()
+            sum_data = np.abs(w_data_raw).sum()
+            target   = batch_size / 2.0
+            scale_sim  = target / sum_sim
+            scale_data = target / sum_data
+
+            log.info(
+                f"Normalizing weights: "
+                f"sim scale={scale_sim:.4f} "
+                f"(sum: {sum_sim:.1f} -> {sum_sim * scale_sim:.1f}), "
+                f"data scale={scale_data:.4f} "
+                f"(sum: {sum_data:.1f} -> {sum_data * scale_data:.1f})"
+            )
+
+            normalized_weights = [w_sim_raw * scale_sim, w_data_raw * scale_data]
+        else:
+            log.info("Skipping weight normalization (normalize=False)")
+            normalized_weights = raw_weights
+
+        for w in normalized_weights:
+            logw = np.log(np.abs(w) + 1e-12)
+            tensor_kwargs["sample_logweights"].append(torch.from_numpy(logw).float())
 
         for k in tensor_kwargs:
             tensor_kwargs[k] = torch.cat(tensor_kwargs[k], dim=0)
