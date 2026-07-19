@@ -2,6 +2,9 @@
 *runs/
 notebooks/
 plots/
+.zshrc
+data/
+Miniforge3.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
