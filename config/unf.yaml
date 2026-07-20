@@ -14,7 +14,7 @@ model:
   norm: l1
   joint_ensembling: false
   norm_target: false
-  cls_path: /scratch/mjosef/Unfolding/aussie/runs/classify_wwbb_multi/2026-04-29_16-04-43
+  cls_path: /scratch/mjosef/Unfolding/aussie/runs/classify_wwbb/2026-07-17_10-15-44
   kernel_p: 2
   kernel_scale: 1
 
@@ -24,7 +24,7 @@ training:
   epochs: 500
   batch_size: 4096
   test_batch_size: ${training.batch_size}
-  patience: 50
+  patience: 10
   optimizer:
     betas: [0.98, 0.999]
 
