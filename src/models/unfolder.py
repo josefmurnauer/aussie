@@ -1,5 +1,5 @@
 import torch
-
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from collections import defaultdict
 from src.models.classifier import Classifier
 from src.models.base_model import Model
@@ -164,7 +164,8 @@ class AutoDiffUnfolder(Unfolder):
             self.classifier.eval()  # disable batchnorm, dropout etc.
 
             # forward pass classifier
-            lw_x = self.classifier(batch).squeeze(-1)
+            with sdpa_kernel(SDPBackend.MATH):
+                lw_x = self.classifier(batch).squeeze(-1)
 
             if self.classifier.ensembled:
 
