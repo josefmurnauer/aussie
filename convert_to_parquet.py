@@ -48,6 +48,7 @@ PARTICLE_BRANCHES = [
 # NOT written into the parquet files (avoids the object-dtype issue with
 # ak.with_field, and keeps files lean since dsid alone is enough provenance)
 DSID_TO_PROCESS = {
+    0: "data",
     601229: "ttbar_pythia",
     601230: "ttbar_pythia",
     601352: "singletop",
