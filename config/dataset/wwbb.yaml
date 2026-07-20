@@ -2,10 +2,11 @@ name: wwbb
 reader:
   _target_: src.datasets.WWbbData.read
   path_sim: /scratch/mjosef/Unfolding/aussie/data/sim
-  path_data: /scratch/mjosef/Unfolding/aussie/data/pseudodata
+  #path_data: /scratch/mjosef/Unfolding/aussie/data/pseudodata
+  path_data: /scratch/mjosef/Unfolding/aussie/data/data
   max_jets: 6
-  num_sim: 2000000
-  num_data: 2000000
+  num_sim: 1000000
+  num_data: null
   normalize: false
   seed: 42
 process:
