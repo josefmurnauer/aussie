@@ -5,7 +5,7 @@ evaluate: True
 plot: True
 
 use_gpu: True
-device: 2
+device: 3
 use_tf32: True
 use_amp: False
 num_cpus: 0
@@ -13,6 +13,7 @@ dry_run: False
 submit: False
 run_dir: runs
 prev_exp_dir: null
+atlas_style: true
 
 num_bnn_samples: 10
 
