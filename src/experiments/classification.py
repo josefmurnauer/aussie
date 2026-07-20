@@ -11,7 +11,6 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from src.experiments.training import TrainingExperiment
-from src.utils import plotting
 
 
 class ClassificationExperiment(TrainingExperiment):
@@ -43,6 +42,10 @@ class ClassificationExperiment(TrainingExperiment):
 
     def plot(self):
 
+        if self.cfg.atlas_style:
+            from src.utils import plotting_atlasstyle as plotting
+        else:
+            from src.utils import plotting
         pcfg = self.cfg.plotting
         pw = pcfg.pagewidth
 
@@ -92,59 +95,146 @@ class ClassificationExperiment(TrainingExperiment):
             exp_weights = None
             sim_weights = None
 
+        # ----------------------------------------------------------------
+        # Detect whether the "data" population has particle-level truth
+        # info. WWbbData (token-based) exposes mask_z; WWbbMultiData
+        # (scalar-feature) does not, so fall back to checking whether z
+        # itself is non-trivially non-zero for that population. This makes
+        # the plotting logic work correctly for BOTH:
+        #   - Herwig pseudodata (MC, has truth)
+        #   - real collision data (no truth at all)
+        # ----------------------------------------------------------------
+        z_dat_check = test_set[:].z[mask_dat]
+        mask_z_all = test_set[:].mask_z
+        if mask_z_all is not None:
+            data_has_truth = bool(mask_z_all[mask_dat].any())
+        else:
+            data_has_truth = bool((z_dat_check != 0).any())
+
+        if not data_has_truth:
+            self.log.info(
+                "Data population has no particle-level truth information -- "
+                "latents.pdf will show only the (unweighted vs. reweighted) "
+                "sim truth curve, without a data-truth reference."
+            )
+
         # latents
         self.log.info("Plotting part latents")
         if dset.aux_z is None:
-            z_dat = test_set[:].z[mask_dat]
             z_sim = test_set[:].z[mask_sim]
+            z_dat = test_set[:].z[mask_dat] if data_has_truth else None
         else:
-            z_dat = test_set[:].aux_z[mask_dat]
             z_sim = test_set[:].aux_z[mask_sim]
+            z_dat = test_set[:].aux_z[mask_dat] if data_has_truth else None
+
         with PdfPages(os.path.join(savedir, "latents.pdf")) as pdf:
             for obs in self.process.observables_z:
-                # --- linear bins ---
-                fig, ax = plotting.plot_reweighting(
-                    exp=obs.compute(z_dat).numpy(),
-                    sim=obs.compute(z_sim).numpy(),
-                    weights_list=[np.exp(lw_x_sim)],
-                    variance_list=[None],
-                    names_list=["Classifier"],
-                    xlabel=obs.label,
-                    figsize=np.array([1, 7 / 8]) * pw / 2,
-                    num_bins=pcfg.num_bins,
-                    discrete=obs.discrete,
-                    log_bins=obs.log_bins,
-                    logy=obs.logy,
-                    qlims=obs.qlims,
-                    xlims=obs.xlims,
-                    name_exp="Herwig Pseudo-Data",
-                    exp_weights=exp_weights,
-                    sim_weights=sim_weights,
-                )
-                pdf.savefig(fig)
-                plt.close(fig)
-                # --- log bins ---
-                fig, ax = plotting.plot_reweighting(
-                    exp=obs.compute(z_dat).numpy(),
-                    sim=obs.compute(z_sim).numpy(),
-                    weights_list=[np.exp(lw_x_sim)],
-                    variance_list=[None],
-                    names_list=["Classifier"],
-                    xlabel=obs.label,
-                    figsize=np.array([1, 7 / 8]) * pw / 2,
-                    num_bins=pcfg.num_bins,
-                    discrete=False,
-                    log_bins=True,
-                    logx=True,
-                    logy=obs.logy,
-                    qlims=obs.qlims,
-                    xlims=obs.xlims,
-                    name_exp="Herwig Pseudo-Data",
-                    exp_weights=exp_weights,
-                    sim_weights=sim_weights,
-                )
-                pdf.savefig(fig)
-                plt.close(fig)
+
+                if data_has_truth:
+                    # --- linear bins: sim vs data truth, both curves ---
+                    fig, ax = plotting.plot_reweighting(
+                        exp=obs.compute(z_dat).numpy(),
+                        sim=obs.compute(z_sim).numpy(),
+                        weights_list=[np.exp(lw_x_sim)],
+                        variance_list=[None],
+                        names_list=["Classifier"],
+                        xlabel=obs.label,
+                        figsize=np.array([1, 7 / 8]) * pw / 2,
+                        num_bins=pcfg.num_bins,
+                        discrete=obs.discrete,
+                        log_bins=obs.log_bins,
+                        logy=obs.logy,
+                        qlims=obs.qlims,
+                        xlims=obs.xlims,
+                        name_exp="Herwig Pseudo-Data",
+                        exp_weights=exp_weights,
+                        sim_weights=sim_weights,
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
+
+                    # --- log bins (only for observables explicitly marked
+                    # as suitable for it) ---
+                    if obs.log_bins:
+                        fig, ax = plotting.plot_reweighting(
+                            exp=obs.compute(z_dat).numpy(),
+                            sim=obs.compute(z_sim).numpy(),
+                            weights_list=[np.exp(lw_x_sim)],
+                            variance_list=[None],
+                            names_list=["Classifier"],
+                            xlabel=obs.label,
+                            figsize=np.array([1, 7 / 8]) * pw / 2,
+                            num_bins=pcfg.num_bins,
+                            discrete=False,
+                            log_bins=True,
+                            logx=True,
+                            logy=obs.logy,
+                            qlims=obs.qlims,
+                            xlims=None,
+                            name_exp="Herwig Pseudo-Data",
+                            exp_weights=exp_weights,
+                            sim_weights=sim_weights,
+                        )
+                        pdf.savefig(fig)
+                        plt.close(fig)
+
+                else:
+                    # --- no data truth available: plot sim-only, showing
+                    # the unweighted vs. classifier-reweighted truth
+                    # curves. exp and sim are both set to the sim array,
+                    # with show_sim=False so the raw "Sim" curve isn't
+                    # duplicated -- the "data"-slot curve becomes exactly
+                    # the unweighted sim baseline (relabeled), and
+                    # add_chi2=False since sim-vs-itself is meaningless.
+                    sim_vals = obs.compute(z_sim).numpy()
+
+                    fig, ax = plotting.plot_reweighting(
+                        exp=sim_vals,
+                        sim=sim_vals,
+                        log_bins=obs.log_bins,
+                        xlims=obs.xlims,
+                        exp_weights=None,
+                        name_exp="Sim (unweighted)",
+                        weights_list=[np.exp(lw_x_sim)],
+                        variance_list=[None],
+                        names_list=["Classifier"],
+                        xlabel=obs.label,
+                        figsize=np.array([1, 7 / 8]) * pw / 2,
+                        num_bins=pcfg.num_bins,
+                        discrete=obs.discrete,
+                        logy=obs.logy,
+                        qlims=obs.qlims,
+                        sim_weights=sim_weights,
+                        show_sim=False,
+                        add_chi2=False,
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
+
+                    if obs.log_bins:
+                        fig, ax = plotting.plot_reweighting(
+                            exp=sim_vals,
+                            sim=sim_vals,
+                            log_bins=True,
+                            logx=True,
+                            xlims=None,
+                            exp_weights=None,
+                            name_exp="Sim (unweighted)",
+                            weights_list=[np.exp(lw_x_sim)],
+                            variance_list=[None],
+                            names_list=["Classifier"],
+                            xlabel=obs.label,
+                            figsize=np.array([1, 7 / 8]) * pw / 2,
+                            num_bins=pcfg.num_bins,
+                            discrete=obs.discrete,
+                            logy=obs.logy,
+                            qlims=obs.qlims,
+                            sim_weights=sim_weights,
+                            show_sim=False,
+                            add_chi2=False,
+                        )
+                        pdf.savefig(fig)
+                        plt.close(fig)
 
         # observables
         self.log.info("Plotting reco observables")
@@ -177,28 +267,31 @@ class ClassificationExperiment(TrainingExperiment):
                 )
                 pdf.savefig(fig)
                 plt.close(fig)
-                # --- log bins ---
-                fig, ax = plotting.plot_reweighting(
-                    exp=obs.compute(x_dat).numpy(),
-                    sim=obs.compute(x_sim).numpy(),
-                    weights_list=[np.exp(lw_x_sim)],
-                    variance_list=[None],
-                    names_list=["Classifier"],
-                    xlabel=obs.label,
-                    figsize=np.array([1, 7 / 8]) * pw / 2,
-                    num_bins=pcfg.num_bins,
-                    discrete=False,
-                    log_bins=True,
-                    logx=True,
-                    logy=obs.logy,
-                    qlims=obs.qlims,
-                    xlims=obs.xlims,
-                    name_exp="Herwig Pseudo-Data",
-                    exp_weights=exp_weights,
-                    sim_weights=sim_weights,
-                )
-                pdf.savefig(fig)
-                plt.close(fig)
+
+                # --- log bins (only for observables explicitly marked as
+                # suitable for it) ---
+                if obs.log_bins:
+                    fig, ax = plotting.plot_reweighting(
+                        exp=obs.compute(x_dat).numpy(),
+                        sim=obs.compute(x_sim).numpy(),
+                        weights_list=[np.exp(lw_x_sim)],
+                        variance_list=[None],
+                        names_list=["Classifier"],
+                        xlabel=obs.label,
+                        figsize=np.array([1, 7 / 8]) * pw / 2,
+                        num_bins=pcfg.num_bins,
+                        discrete=False,
+                        log_bins=True,
+                        logx=True,
+                        logy=obs.logy,
+                        qlims=obs.qlims,
+                        xlims=None,
+                        name_exp="Herwig Pseudo-Data",
+                        exp_weights=exp_weights,
+                        sim_weights=sim_weights,
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
 
             labels = labels.int().numpy()
             wx = np.exp(lw_x_sim)

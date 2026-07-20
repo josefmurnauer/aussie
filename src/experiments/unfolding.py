@@ -9,7 +9,6 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from src.experiments.training import TrainingExperiment
-from src.utils import plotting
 
 
 class UnfoldingExperiment(TrainingExperiment):
@@ -46,6 +45,11 @@ class UnfoldingExperiment(TrainingExperiment):
         return predictions
 
     def plot(self):
+
+        if self.cfg.atlas_style:
+            from src.utils import plotting_atlasstyle as plotting
+        else:
+            from src.utils import plotting
 
         pcfg = self.cfg.plotting
         pw   = pcfg.pagewidth
@@ -131,59 +135,145 @@ class UnfoldingExperiment(TrainingExperiment):
             names_list.append("Classifier")
 
         # ----------------------------------------------------------------
+        # Detect whether the "data" population has particle-level truth
+        # info. WWbbData (token-based) exposes mask_z; WWbbMultiData
+        # (scalar-feature) does not, so fall back to checking whether z
+        # itself is non-trivially non-zero for that population. This makes
+        # the plotting logic work correctly for BOTH:
+        #   - Herwig pseudodata (MC, has truth)
+        #   - real collision data (no truth at all)
+        # ----------------------------------------------------------------
+        z_dat_check = test_set[:].z[mask_dat]
+        mask_z_all = test_set[:].mask_z
+        if mask_z_all is not None:
+            data_has_truth = bool(mask_z_all[mask_dat].any())
+        else:
+            data_has_truth = bool((z_dat_check != 0).any())
+
+        if not data_has_truth:
+            self.log.info(
+                "Data population has no particle-level truth information -- "
+                "latents.pdf will show only sim truth curves (unweighted, "
+                "classifier-reweighted, AUSSIE-unfolded), without a "
+                "data-truth reference."
+            )
+
+        # ----------------------------------------------------------------
         # Latents (gen level)
         # ----------------------------------------------------------------
         self.log.info("Plotting part latents")
         if dset.aux_z is None:
-            z_dat = test_set[:].z[mask_dat]
             z_sim = test_set[:].z[mask_sim]
+            z_dat = test_set[:].z[mask_dat] if data_has_truth else None
         else:
-            z_dat = test_set[:].aux_z[mask_dat]
             z_sim = test_set[:].aux_z[mask_sim]
+            z_dat = test_set[:].aux_z[mask_dat] if data_has_truth else None
 
         with PdfPages(os.path.join(savedir, "latents.pdf")) as pdf:
             for obs in self.process.observables_z:
-                # --- linear bins ---
-                fig, ax = plotting.plot_reweighting(
-                    exp=obs.compute(z_dat).numpy(),
-                    sim=obs.compute(z_sim).numpy(),
-                    weights_list=weights_list,
-                    variance_list=variance_list,
-                    names_list=names_list,
-                    xlabel=obs.label,
-                    figsize=np.array([1, 5 / 6]) * pw / 2,
-                    num_bins=pcfg.num_bins,
-                    discrete=obs.discrete,
-                    log_bins=obs.log_bins,
-                    logy=obs.logy,
-                    qlims=obs.qlims,
-                    xlims=obs.xlims,
-                    exp_weights=exp_weights,
-                    sim_weights=sim_weights,    # <- Sim histogram weighted
-                )
-                pdf.savefig(fig)
-                plt.close(fig)
-                # --- log bins ---
-                fig, ax = plotting.plot_reweighting(
-                    exp=obs.compute(z_dat).numpy(),
-                    sim=obs.compute(z_sim).numpy(),
-                    weights_list=weights_list,
-                    variance_list=variance_list,
-                    names_list=names_list,
-                    xlabel=obs.label,
-                    figsize=np.array([1, 5 / 6]) * pw / 2,
-                    num_bins=pcfg.num_bins,
-                    discrete=False,
-                    log_bins=True,
-                    logx=True,
-                    logy=obs.logy,
-                    qlims=obs.qlims,
-                    xlims=obs.xlims,
-                    exp_weights=exp_weights,
-                    sim_weights=sim_weights,    # <- Sim histogram weighted
-                )
-                pdf.savefig(fig)
-                plt.close(fig)
+
+                if data_has_truth:
+                    # --- linear bins ---
+                    fig, ax = plotting.plot_reweighting(
+                        exp=obs.compute(z_dat).numpy(),
+                        sim=obs.compute(z_sim).numpy(),
+                        weights_list=weights_list,
+                        variance_list=variance_list,
+                        names_list=names_list,
+                        xlabel=obs.label,
+                        figsize=np.array([1, 5 / 6]) * pw / 2,
+                        num_bins=pcfg.num_bins,
+                        discrete=obs.discrete,
+                        log_bins=obs.log_bins,
+                        logy=obs.logy,
+                        qlims=obs.qlims,
+                        xlims=obs.xlims,
+                        exp_weights=exp_weights,
+                        sim_weights=sim_weights,    # <- Sim histogram weighted
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
+
+                    # --- log bins (only for observables explicitly marked
+                    # as suitable for it) ---
+                    if obs.log_bins:
+                        fig, ax = plotting.plot_reweighting(
+                            exp=obs.compute(z_dat).numpy(),
+                            sim=obs.compute(z_sim).numpy(),
+                            weights_list=weights_list,
+                            variance_list=variance_list,
+                            names_list=names_list,
+                            xlabel=obs.label,
+                            figsize=np.array([1, 5 / 6]) * pw / 2,
+                            num_bins=pcfg.num_bins,
+                            discrete=False,
+                            log_bins=True,
+                            logx=True,
+                            logy=obs.logy,
+                            qlims=obs.qlims,
+                            xlims=None,
+                            exp_weights=exp_weights,
+                            sim_weights=sim_weights,    # <- Sim histogram weighted
+                        )
+                        pdf.savefig(fig)
+                        plt.close(fig)
+
+                else:
+                    # --- no data truth available: plot sim-only, showing
+                    # unweighted, classifier-reweighted, and AUSSIE-unfolded
+                    # truth curves. exp and sim are both set to the sim
+                    # array, with show_sim=False so the raw "Sim" curve
+                    # isn't duplicated, and add_chi2=False since
+                    # sim-vs-itself is meaningless.
+                    sim_vals = obs.compute(z_sim).numpy()
+
+                    fig, ax = plotting.plot_reweighting(
+                        exp=sim_vals,
+                        sim=sim_vals,
+                        weights_list=weights_list,
+                        variance_list=variance_list,
+                        names_list=names_list,
+                        xlabel=obs.label,
+                        figsize=np.array([1, 5 / 6]) * pw / 2,
+                        num_bins=pcfg.num_bins,
+                        discrete=obs.discrete,
+                        log_bins=obs.log_bins,
+                        logy=obs.logy,
+                        qlims=obs.qlims,
+                        xlims=obs.xlims,
+                        exp_weights=None,
+                        sim_weights=sim_weights,
+                        name_exp="Sim (unweighted)",
+                        show_sim=False,
+                        add_chi2=False,
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
+
+                    if obs.log_bins:
+                        fig, ax = plotting.plot_reweighting(
+                            exp=sim_vals,
+                            sim=sim_vals,
+                            weights_list=weights_list,
+                            variance_list=variance_list,
+                            names_list=names_list,
+                            xlabel=obs.label,
+                            figsize=np.array([1, 5 / 6]) * pw / 2,
+                            num_bins=pcfg.num_bins,
+                            discrete=False,
+                            log_bins=True,
+                            logx=True,
+                            logy=obs.logy,
+                            qlims=obs.qlims,
+                            xlims=None,
+                            exp_weights=None,
+                            sim_weights=sim_weights,
+                            name_exp="Sim (unweighted)",
+                            show_sim=False,
+                            add_chi2=False,
+                        )
+                        pdf.savefig(fig)
+                        plt.close(fig)
 
         # ----------------------------------------------------------------
         # Observables (reco level)
@@ -218,27 +308,29 @@ class UnfoldingExperiment(TrainingExperiment):
                 )
                 pdf.savefig(fig)
                 plt.close(fig)
-                # --- log bins ---
-                fig, ax = plotting.plot_reweighting(
-                    exp=obs.compute(x_dat).numpy(),
-                    sim=obs.compute(x_sim).numpy(),
-                    weights_list=weights_list,
-                    variance_list=variance_list,
-                    names_list=names_list,
-                    xlabel=obs.label,
-                    figsize=np.array([1, 5 / 6]) * pw / 2,
-                    num_bins=pcfg.num_bins,
-                    discrete=False,
-                    log_bins=True,
-                    logx=True,
-                    logy=obs.logy,
-                    qlims=obs.qlims,
-                    xlims=obs.xlims,
-                    exp_weights=exp_weights,
-                    sim_weights=sim_weights,    # <- Sim histogram weighted
-                )
-                pdf.savefig(fig)
-                plt.close(fig)
+
+                # --- log bins (see guard explanation above) ---
+                if obs.log_bins:
+                    fig, ax = plotting.plot_reweighting(
+                        exp=obs.compute(x_dat).numpy(),
+                        sim=obs.compute(x_sim).numpy(),
+                        weights_list=weights_list,
+                        variance_list=variance_list,
+                        names_list=names_list,
+                        xlabel=obs.label,
+                        figsize=np.array([1, 5 / 6]) * pw / 2,
+                        num_bins=pcfg.num_bins,
+                        discrete=False,
+                        log_bins=True,
+                        logx=True,
+                        logy=obs.logy,
+                        qlims=obs.qlims,
+                        xlims=None,
+                        exp_weights=exp_weights,
+                        sim_weights=sim_weights,    # <- Sim histogram weighted
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
 
             # ---- classifier score plot ------------------------------------
             labels         = labels.int().numpy()
