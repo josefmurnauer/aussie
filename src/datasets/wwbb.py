@@ -4,6 +4,7 @@ import os
 
 import awkward as ak
 import numpy as np
+import pyarrow.parquet as pq
 import torch
 from collections import defaultdict
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ def _resolve_paths(path):
     list/tuple mixing either, and return a flat sorted list of file paths.
 
     This is what lets WWbbData.read() be pointed directly at e.g.
-    '.../Run3/sim' or '.../Run3/pseudodata' without listing files by hand.
+    '.../Run3/sim' or '.../Run3/data' without listing files by hand.
     """
     if isinstance(path, (list, tuple)):
         resolved = []
@@ -85,6 +86,21 @@ def _resolve_paths(path):
             raise FileNotFoundError(f"No parquet files found in directory {path}")
         return files
     return [path]
+
+
+def _available_columns(paths):
+    """Return the set of column names available in the parquet file(s) for
+    a given population. Only the first file is inspected, assuming a
+    consistent schema across all chunk files belonging to the same
+    population (true for files produced by our ROOT->parquet converter).
+
+    This is what allows WWbbData.read() to automatically detect whether
+    particle-level truth branches and/or the MC weight branch exist for a
+    given population -- e.g. real collision data will have neither, while
+    MC sim/pseudodata will have both -- without needing to hardcode this
+    based on population index.
+    """
+    return set(pq.ParquetFile(paths[0]).schema_arrow.names)
 
 
 def _get_object_field(arrays, field, scale=1.0):
@@ -130,13 +146,26 @@ def _met_to_cartesian(met, met_phi):
     return np.stack([met, px, py, np.zeros_like(met)], axis=-1)
 
 
-def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging):
-    """Build (features, mask) for one event collection at one level (reco/truth).
+def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_invalid=False):
+    """Build (features, mask, valid) for one event collection at one level
+    (reco/truth).
 
     Token layout: [muon, met, jet_0, ..., jet_{max_jets-1}]
     Feature layout: [E, px, py, pz, is_mu, is_met, is_jet, (tagging scores...)]
 
     All pt/energy quantities are converted from MeV (raw ntuple units) to GeV.
+
+    Some branches (most notably particle-level muon kinematics) can contain
+    NaN for a small fraction of events -- e.g. when the truth-level lepton
+    isn't actually a muon (electron/tau truth lepton in an event that still
+    passed reco-level muon selection). `valid` marks events where ALL
+    features are finite.
+
+    If `drop_invalid` is True, non-finite events are left as NaN in the
+    returned tensor (caller is expected to filter using `valid` before use).
+    If False, non-finite values are replaced with 0.0 in place (safe
+    default for reco-level data, which should not contain NaNs in practice
+    but gets a defensive fallback regardless).
     """
     n_tokens = 2 + max_jets
 
@@ -192,11 +221,29 @@ def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging):
 
     features = np.concatenate([momenta, scalars], axis=-1)
 
+    # ---- NaN handling ----
+    valid = np.isfinite(features).reshape(n_events, -1).all(axis=1)
+    n_invalid = (~valid).sum()
+
+    if n_invalid > 0:
+        if drop_invalid:
+            log.warning(
+                f"{n_invalid} / {n_events} events have non-finite features "
+                f"(likely non-muon truth lepton) -- will be dropped"
+            )
+        else:
+            log.warning(f"Replacing {n_invalid} non-finite event(s) with 0.0")
+            features = np.nan_to_num(features, nan=0.0)
+
     mask = np.zeros((n_events, n_tokens), dtype=bool)
     mask[:, :2] = True
     mask[:, 2:] = np.arange(max_jets)[None, :] < n_jets[:, None]
 
-    return torch.from_numpy(features).float(), torch.from_numpy(mask)
+    return (
+        torch.from_numpy(features).float(),
+        torch.from_numpy(mask),
+        torch.from_numpy(valid),
+    )
 
 
 def _needed_columns(branch_map, include_weight=False):
@@ -213,6 +260,20 @@ def _load_arrays(paths, columns, num=None, seed=42):
 
     Random sampling ensures all DSIDs (e.g. ttbar + singletop) are
     proportionally represented even when num << total events.
+
+    Returns
+    -------
+    arrays : ak.Array
+        The (possibly subsampled) event array.
+    weight_scale : float
+        Compensation factor (total / num_sampled) intended to be
+        multiplied onto the event weight branch so that the SUM of
+        weights in the subsample remains an unbiased estimator of the
+        full-sample weight sum. Without this, two populations subsampled
+        at different retained fractions (e.g. sim vs data drawn from
+        pools of very different total size) end up with mismatched
+        relative normalization even though each individual weight value
+        itself is untouched by the sampling.
     """
     if len(paths) == 1:
         arrays = ak.from_parquet(paths[0], columns=columns)
@@ -222,15 +283,17 @@ def _load_arrays(paths, columns, num=None, seed=42):
         )
 
     total = len(arrays)
+    weight_scale = 1.0
 
     if num is not None and num < total:
         rng = np.random.default_rng(seed)
         indices = rng.choice(total, size=num, replace=False)
         indices.sort()  # sorted access is much faster for parquet/awkward
         arrays = arrays[indices]
+        weight_scale = total / num
         log.info(
             f"  randomly sampled {num} / {total} events "
-            f"(seed={seed})"
+            f"(seed={seed}, weight compensation factor={weight_scale:.4f})"
         )
     elif num is not None and num >= total:
         log.info(
@@ -238,7 +301,7 @@ def _load_arrays(paths, columns, num=None, seed=42):
             f"-- using all events"
         )
 
-    return arrays
+    return arrays, weight_scale
 
 
 # ----------------------------------------------------------------------------
@@ -261,6 +324,16 @@ class WWbbData(UnfoldingData):
         normalize: bool = False,
         seed: int = 42,                   # random sampling seed
     ):
+        """
+        path_data may point at either:
+          - Herwig pseudodata (MC, has both particle-level truth and
+            weight_total_NOSYS), or
+          - real collision data (has neither).
+
+        Truth/weight availability is detected automatically per population
+        by inspecting the parquet schema -- no config flag needed, and no
+        assumption is made that population index 0 vs 1 determines this.
+        """
         # backwards compatibility
         if num is not None:
             if num_sim is None:
@@ -277,39 +350,77 @@ class WWbbData(UnfoldingData):
             ((path_sim, num_sim), (path_data, num_data))
         ):
             paths = _resolve_paths(path)
-            label = "sim" if i == 0 else "pseudodata"
+            label = "sim" if i == 0 else "data"
             log.info(f"[{label}] reading {len(paths)} parquet file(s) from {path}")
 
-            columns = _needed_columns(RECO_BRANCHES, include_weight=True)
-            columns += _needed_columns(PARTICLE_BRANCHES)
+            available = _available_columns(paths)
+            has_weight = RECO_BRANCHES["weight"] in available
+            has_truth = all(b in available for b in PARTICLE_BRANCHES.values())
+            log.info(f"[{label}] has_weight={has_weight}, has_truth={has_truth}")
+
+            columns = _needed_columns(RECO_BRANCHES, include_weight=has_weight)
+            if has_truth:
+                columns += _needed_columns(PARTICLE_BRANCHES)
             columns = list(dict.fromkeys(columns))
 
-            arrays = _load_arrays(paths, columns, num=num_i, seed=seed)
+            arrays, weight_scale = _load_arrays(paths, columns, num=num_i, seed=seed)
             n_events = len(arrays)
             log.info(f"[{label}] loaded {n_events} events")
 
-            # RECO LEVEL
-            features_x, mask_x = _build_tokens(
-                arrays, RECO_BRANCHES, max_jets, n_events, include_tagging=True,
+            # ---------------- RECO LEVEL ----------------
+            features_x, mask_x, _ = _build_tokens(
+                arrays, RECO_BRANCHES, max_jets, n_events,
+                include_tagging=True, drop_invalid=False,
             )
+
+            # ---------------- PARTICLE LEVEL ----------------
+            if has_truth:
+                # drop events with invalid truth muon (e.g. non-muon truth
+                # lepton); irrelevant for a population without truth at all
+                features_z, mask_z, valid_z = _build_tokens(
+                    arrays, PARTICLE_BRANCHES, max_jets, n_events,
+                    include_tagging=False, drop_invalid=True,
+                )
+                keep_mask = valid_z
+            else:
+                # placeholder zeros -- never used in training for this
+                # population, but kept shape-consistent so batching works
+                n_scalars_z = 3
+                features_z = torch.zeros((n_events, n_tokens, 4 + n_scalars_z))
+                mask_z = torch.zeros((n_events, n_tokens), dtype=torch.bool)
+                keep_mask = torch.ones(n_events, dtype=torch.bool)
+
+            n_kept = keep_mask.sum().item()
+            if n_kept < n_events:
+                log.info(
+                    f"[{label}] dropping {n_events - n_kept} events "
+                    f"with invalid truth muon"
+                )
+
+            features_x = features_x[keep_mask]
+            mask_x = mask_x[keep_mask]
+            features_z = torch.nan_to_num(features_z[keep_mask], nan=0.0)
+            mask_z = mask_z[keep_mask]
+
             tensor_kwargs["x"].append(features_x)
             tensor_kwargs["mask_x"].append(mask_x)
-
-            # event weights
-            weight_branch = RECO_BRANCHES["weight"]
-            if weight_branch in arrays.fields:
-                w = ak.to_numpy(arrays[weight_branch]).astype(np.float32)
-            else:
-                w = np.ones(n_events, dtype=np.float32)
-            raw_weights.append(w)
-
-            # PARTICLE LEVEL
-            features_z, mask_z = _build_tokens(
-                arrays, PARTICLE_BRANCHES, max_jets, n_events, include_tagging=False,
-            )
             tensor_kwargs["z"].append(features_z)
             tensor_kwargs["mask_z"].append(mask_z)
 
+            # event weights (filtered consistently with keep_mask, and
+            # compensated for subsampling so relative normalization between
+            # populations is preserved regardless of num_sim/num_data).
+            # Defaults to unit weight if the weight branch isn't present
+            # (always true for real collision data).
+            if has_weight:
+                w = ak.to_numpy(arrays[RECO_BRANCHES["weight"]]).astype(np.float32)
+            else:
+                w = np.ones(n_events, dtype=np.float32)
+            w = w[keep_mask.numpy()]
+            w = w * weight_scale
+            raw_weights.append(w)
+
+            n_events = n_kept
             tensor_kwargs["labels"].append(
                 torch.full((n_events,), i, dtype=torch.float32)
             )
@@ -381,6 +492,7 @@ class WWbbProcess:
             compute=lambda x: torch.sqrt(x[..., 0, 1] ** 2 + x[..., 0, 2] ** 2),
             label=r"$p_{T,\mu}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="mu_eta",
@@ -389,12 +501,14 @@ class WWbbProcess:
             ),
             label=r"$\eta_{\mu}$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="mu_e",
             compute=lambda x: x[..., 0, 0],
             label=r"$E_{\mu}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- leading jet ----
         Observable(
@@ -402,6 +516,7 @@ class WWbbProcess:
             compute=lambda x: torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2),
             label=r"Leading jet $p_T$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="j1_eta",
@@ -410,12 +525,14 @@ class WWbbProcess:
             ),
             label=r"Leading jet $\eta$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="j1_e",
             compute=lambda x: x[..., 2, 0],
             label=r"Leading jet $E$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- subleading jet ----
         Observable(
@@ -423,6 +540,7 @@ class WWbbProcess:
             compute=lambda x: torch.sqrt(x[..., 3, 1] ** 2 + x[..., 3, 2] ** 2),
             label=r"Subleading jet $p_T$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="j2_eta",
@@ -431,12 +549,14 @@ class WWbbProcess:
             ),
             label=r"Subleading jet $\eta$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="j2_e",
             compute=lambda x: x[..., 3, 0],
             label=r"Subleading jet $E$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- third leading jet ----
         Observable(
@@ -444,6 +564,7 @@ class WWbbProcess:
             compute=lambda x: torch.sqrt(x[..., 4, 1] ** 2 + x[..., 4, 2] ** 2),
             label=r"3rd jet $p_T$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="j3_eta",
@@ -452,12 +573,14 @@ class WWbbProcess:
             ),
             label=r"3rd jet $\eta$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="j3_e",
             compute=lambda x: x[..., 4, 0],
             label=r"3rd jet $E$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- MET (kept as a useful cross-check) ----
         Observable(
@@ -465,6 +588,7 @@ class WWbbProcess:
             compute=lambda x: x[..., 1, 0],
             label=r"$E_T^{\text{miss}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
     )
 
@@ -475,6 +599,7 @@ class WWbbProcess:
             compute=lambda z: torch.sqrt(z[..., 0, 1] ** 2 + z[..., 0, 2] ** 2),
             label=r"$p_{T,\mu}^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="mu_eta_truth",
@@ -483,12 +608,14 @@ class WWbbProcess:
             ),
             label=r"$\eta_{\mu}^{\text{truth}}$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="mu_e_truth",
             compute=lambda z: z[..., 0, 0],
             label=r"$E_{\mu}^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- leading jet (truth) ----
         Observable(
@@ -496,6 +623,7 @@ class WWbbProcess:
             compute=lambda z: torch.sqrt(z[..., 2, 1] ** 2 + z[..., 2, 2] ** 2),
             label=r"Leading jet $p_T^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="j1_eta_truth",
@@ -504,12 +632,14 @@ class WWbbProcess:
             ),
             label=r"Leading jet $\eta^{\text{truth}}$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="j1_e_truth",
             compute=lambda z: z[..., 2, 0],
             label=r"Leading jet $E^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- subleading jet (truth) ----
         Observable(
@@ -517,6 +647,7 @@ class WWbbProcess:
             compute=lambda z: torch.sqrt(z[..., 3, 1] ** 2 + z[..., 3, 2] ** 2),
             label=r"Subleading jet $p_T^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="j2_eta_truth",
@@ -525,12 +656,14 @@ class WWbbProcess:
             ),
             label=r"Subleading jet $\eta^{\text{truth}}$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="j2_e_truth",
             compute=lambda z: z[..., 3, 0],
             label=r"Subleading jet $E^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- third leading jet (truth) ----
         Observable(
@@ -538,6 +671,7 @@ class WWbbProcess:
             compute=lambda z: torch.sqrt(z[..., 4, 1] ** 2 + z[..., 4, 2] ** 2),
             label=r"3rd jet $p_T^{\text{truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         Observable(
             name="j3_eta_truth",
@@ -546,12 +680,14 @@ class WWbbProcess:
             ),
             label=r"3rd jet $\eta^{\text{truth}}$",
             xlims=(-5, 5),
+            log_bins=False,
         ),
         Observable(
             name="j3_e_truth",
             compute=lambda z: z[..., 4, 0],
             label=r"3rd jet $E^{\text{truth}}$ [GeV]",
-            xlims=(1e-3, 1 - 1e-3),
+            qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
         # ---- MET (truth) ----
         Observable(
@@ -559,5 +695,6 @@ class WWbbProcess:
             compute=lambda z: z[..., 1, 0],
             label=r"$E_T^{\text{miss,truth}}$ [GeV]",
             qlims=(1e-3, 1 - 1e-3),
+            log_bins=True,
         ),
     )
