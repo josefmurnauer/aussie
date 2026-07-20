@@ -5,14 +5,9 @@ defaults:
   - _self_
 
 model:
-  #kernel_p: 2
-  #kernel_scale: 2.5   # matches measured median/mean pairwise distance
   net:
     dim_in: ${dataset.process.num_features}
     dim_out: 1
-    #hidden_channels: 64
-    #num_hidden_layers: 3
-    #act: silu
     ensembled: false
 
 training:
