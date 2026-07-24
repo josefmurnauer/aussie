@@ -26,41 +26,32 @@ log = logging.getLogger("WWbbMultiData")
 
 
 # ----------------------------------------------------------------------------
-# Branch subsets. RECO_BRANCHES/PARTICLE_BRANCHES (from wwbb.py) don't
-# include the dedicated single leading-b-jet branches, so those are added
-# directly here.
+# Branch subsets. Only muon and jet pt/energy are needed for this feature set.
 # ----------------------------------------------------------------------------
 
 RECO_BRANCHES_MULTI = {
     k: RECO_BRANCHES[k]
-    for k in ("mu_pt", "mu_phi", "met_met", "jet_pt", "jet_phi", "weight")
+    for k in ("mu_pt", "mu_e", "jet_pt", "jet_e", "weight")
 }
-RECO_BRANCHES_MULTI["bjet_pt"] = "jet1_bjet_pt_NOSYS"   # already in GeV
 
 PARTICLE_BRANCHES_MULTI = {
     k: PARTICLE_BRANCHES[k]
-    for k in ("mu_pt", "mu_phi", "met_met", "jet_pt", "jet_phi")
+    for k in ("mu_pt", "mu_e", "jet_pt", "jet_e")
 }
-PARTICLE_BRANCHES_MULTI["bjet_pt"] = "PL_bjet1_pt_GEV_NOSYS"   # already in GeV
 
-# feature order:
-# [j1_pt, j2_pt, met_pt, mu_pt, n_jets, dphi(mu,j1), dphi(mu,j2), bjet_pt]
+N_LEADING_JETS = 3
+
+# feature order: [mu_pt, mu_e, j1_pt, j1_e, j2_pt, j2_e, j3_pt, j3_e]
 FEATURE_NAMES = [
-    "j1_pt", "j2_pt", "met_pt", "mu_pt",
-    "n_jets", "dphi_mu_j1", "dphi_mu_j2", "bjet_pt",
+    "mu_pt", "mu_e",
+    "j1_pt", "j1_e",
+    "j2_pt", "j2_e",
+    "j3_pt", "j3_e",
 ]
-N_FEATURES = 8
+N_FEATURES = 2 + 2 * N_LEADING_JETS  # 8
 
-# indices that get log-transformed (strictly positive, wide dynamic range
-# pT-like quantities). n_jets and the two delta_phi features are NOT
-# log-transformed -- they're standardized directly.
-LOG_INDICES = (0, 1, 2, 3, 7)
-
-
-def _delta_phi(phi1, phi2):
-    """Wrap to [-pi, pi]."""
-    dphi = phi1 - phi2
-    return (dphi + np.pi) % (2 * np.pi) - np.pi
+# all features are strictly-positive pT/energy quantities -- log-transform all
+LOG_INDICES = tuple(range(N_FEATURES))
 
 
 def _available_columns(paths):
@@ -72,61 +63,27 @@ def _available_columns(paths):
     return set(pq.ParquetFile(paths[0]).schema_arrow.names)
 
 
-def _extract_scalar_features(arrays, branch_map, n_events, drop_invalid=False,
-                              has_bjet=True):
-    """Extract scalar features:
-        [j1_pt, j2_pt, met_pt, mu_pt, n_jets,
-         delta_phi(mu, j1), delta_phi(mu, j2), (bjet_pt)]
+def _extract_scalar_features(arrays, branch_map, n_events, drop_invalid=False):
+    """Extract 8 scalar features:
+        [mu_pt, mu_e, j1_pt, j1_e, j2_pt, j2_e, j3_pt, j3_e]
 
     Jets are assumed pT-sorted (standard ATLAS ntuple convention).
-    Events with fewer than 2 jets get 0 for the missing subleading-jet
-    slot and the corresponding delta_phi (n_jets correctly reflects this
-    so the network can learn these features are meaningless in that case).
-
-    bjet_pt comes from the ntuple's precomputed leading-b-jet branch
-    (already in GeV). If has_bjet is False (branch not present in this
-    population's schema, e.g. an alternate real-data ntuple production
-    without the dedicated single-b-jet branch), bjet_pt is filled with 0
-    for every event rather than reading a nonexistent column.
+    Events with fewer than N_LEADING_JETS jets get 0 for the missing
+    jet slots' pt/e.
     """
     mu_pt = _get_object_field(arrays, branch_map["mu_pt"], scale=MEV_TO_GEV)
-    mu_phi = _get_object_field(arrays, branch_map["mu_phi"])
-    met_pt = _get_object_field(arrays, branch_map["met_met"], scale=MEV_TO_GEV)
+    mu_e = _get_object_field(arrays, branch_map["mu_e"], scale=MEV_TO_GEV)
 
-    n_jets = ak.num(arrays[branch_map["jet_pt"]]).to_numpy().astype(np.float32)
-
-    jets_pt = _pad(arrays[branch_map["jet_pt"]], 2, scale=MEV_TO_GEV)
-    jets_phi = _pad(arrays[branch_map["jet_phi"]], 2)
-    j1_pt = jets_pt[:, 0]
-    j2_pt = jets_pt[:, 1]
-    j1_phi = jets_phi[:, 0]
-    j2_phi = jets_phi[:, 1]
-
-    dphi_mu_j1 = _delta_phi(mu_phi, j1_phi).astype(np.float32)
-    dphi_mu_j2 = _delta_phi(mu_phi, j2_phi).astype(np.float32)
-    # zero out delta_phi where the corresponding jet doesn't exist
-    dphi_mu_j1 = np.where(n_jets > 0, dphi_mu_j1, 0.0)
-    dphi_mu_j2 = np.where(n_jets > 1, dphi_mu_j2, 0.0)
-
-    if has_bjet:
-        # leading b-jet: already in GeV, no MEV_TO_GEV scaling
-        bjet_pt = _get_object_field(arrays, branch_map["bjet_pt"], scale=1.0)
-        n_no_bjet = (bjet_pt <= 0).sum()
-        if n_no_bjet > 0:
-            log.info(
-                f"  {n_no_bjet} / {n_events} events have no identified "
-                f"leading b-jet (bjet_pt <= 0) -- clipped to 0"
-            )
-        bjet_pt = np.clip(bjet_pt, a_min=0.0, a_max=None)
-    else:
-        log.info(
-            f"  bjet_pt branch not present in this population's schema "
-            f"-- filling with 0 for all {n_events} events"
-        )
-        bjet_pt = np.zeros(n_events, dtype=np.float32)
+    jets_pt = _pad(arrays[branch_map["jet_pt"]], N_LEADING_JETS, scale=MEV_TO_GEV)
+    jets_e = _pad(arrays[branch_map["jet_e"]], N_LEADING_JETS, scale=MEV_TO_GEV)
 
     features = np.stack(
-        [j1_pt, j2_pt, met_pt, mu_pt, n_jets, dphi_mu_j1, dphi_mu_j2, bjet_pt],
+        [
+            mu_pt, mu_e,
+            jets_pt[:, 0], jets_e[:, 0],
+            jets_pt[:, 1], jets_e[:, 1],
+            jets_pt[:, 2], jets_e[:, 2],
+        ],
         axis=1,
     ).astype(np.float32)
 
@@ -198,19 +155,19 @@ class WWbbMultiData(UnfoldingData):
     opposed to the full L-GATr point-cloud approach in WWbbData.
 
     Features (reco and truth, same ordering):
-        0 : leading jet pT
-        1 : subleading jet pT
-        2 : MET
-        3 : muon pT
-        4 : number of jets
-        5 : delta_phi(muon, leading jet)
-        6 : delta_phi(muon, subleading jet)
-        7 : leading b-jet pT
+        0 : muon pT
+        1 : muon E
+        2 : leading jet pT
+        3 : leading jet E
+        4 : subleading jet pT
+        5 : subleading jet E
+        6 : 3rd jet pT
+        7 : 3rd jet E
 
     path_data may point at either Herwig pseudodata (MC, has particle-level
-    truth, weight_total_NOSYS, and the leading-b-jet branch) or real
-    collision data (has none of these). Availability is detected
-    automatically per population by inspecting the parquet schema.
+    truth and weight_total_NOSYS) or real collision data (has neither).
+    Availability is detected automatically per population by inspecting
+    the parquet schema.
     """
 
     @classmethod
@@ -245,23 +202,11 @@ class WWbbMultiData(UnfoldingData):
             available = _available_columns(paths)
             has_weight = RECO_BRANCHES_MULTI["weight"] in available
             has_truth = all(b in available for b in PARTICLE_BRANCHES_MULTI.values())
-            has_bjet_reco = RECO_BRANCHES_MULTI["bjet_pt"] in available
-            has_bjet_truth = PARTICLE_BRANCHES_MULTI["bjet_pt"] in available
-            log.info(
-                f"[{label}] has_weight={has_weight}, has_truth={has_truth}, "
-                f"has_bjet_reco={has_bjet_reco}, has_bjet_truth={has_bjet_truth}"
-            )
+            log.info(f"[{label}] has_weight={has_weight}, has_truth={has_truth}")
 
             columns = _needed_columns_multi(RECO_BRANCHES_MULTI, include_weight=has_weight)
-            if not has_bjet_reco:
-                columns = [c for c in columns if c != RECO_BRANCHES_MULTI["bjet_pt"]]
             if has_truth:
-                truth_cols = _needed_columns_multi(PARTICLE_BRANCHES_MULTI)
-                if not has_bjet_truth:
-                    truth_cols = [
-                        c for c in truth_cols if c != PARTICLE_BRANCHES_MULTI["bjet_pt"]
-                    ]
-                columns += truth_cols
+                columns += _needed_columns_multi(PARTICLE_BRANCHES_MULTI)
             columns = list(dict.fromkeys(columns))
 
             arrays, weight_scale = _load_arrays_multi(paths, columns, num=num_i, seed=seed)
@@ -270,15 +215,13 @@ class WWbbMultiData(UnfoldingData):
 
             # ---------------- RECO LEVEL ----------------
             x, _ = _extract_scalar_features(
-                arrays, RECO_BRANCHES_MULTI, n_events,
-                drop_invalid=False, has_bjet=has_bjet_reco,
+                arrays, RECO_BRANCHES_MULTI, n_events, drop_invalid=False
             )
 
             # ---------------- PARTICLE LEVEL ----------------
             if has_truth:
                 z, valid_z = _extract_scalar_features(
-                    arrays, PARTICLE_BRANCHES_MULTI, n_events,
-                    drop_invalid=True, has_bjet=has_bjet_truth,
+                    arrays, PARTICLE_BRANCHES_MULTI, n_events, drop_invalid=True
                 )
                 keep_mask = valid_z
             else:
@@ -301,9 +244,10 @@ class WWbbMultiData(UnfoldingData):
             tensor_kwargs["x"].append(x)
             tensor_kwargs["z"].append(z)
 
-            # event weights, compensated for subsampling. Defaults to unit
-            # weight if the weight branch isn't present (always true for
-            # real collision data).
+            # event weights, compensated for subsampling so relative
+            # normalization between populations is preserved regardless of
+            # num_sim/num_data. Defaults to unit weight if the weight
+            # branch isn't present (always true for real collision data).
             if has_weight:
                 w = ak.to_numpy(arrays[RECO_BRANCHES_MULTI["weight"]]).astype(np.float32)
             else:
@@ -351,10 +295,8 @@ class WWbbMultiData(UnfoldingData):
 @tensorclass
 class WWbbMultiTransform:
     """
-    Preprocessing for the 8 scalar features:
-        indices 0,1,2,3,7 (pT features): log-transform + standardize
-        index 4 (n_jets): standardize only
-        indices 5,6 (delta_phi): standardize only
+    Preprocessing for the 8 scalar features (all pT/energy quantities):
+        log-transform + standardize, applied uniformly to all 8 indices.
 
     NOTE: shift_x/scale_x/shift_z/scale_z below are PLACEHOLDERS.
     Run compute_shift_scale() once on your sim data and paste the
@@ -394,9 +336,8 @@ class WWbbMultiTransform:
 
 def compute_shift_scale(path_sim: str, num: Optional[int] = None, seed: int = 42):
     """
-    Compute per-feature mean/std after log transform (for pT-like features
-    only) from the sim parquet files, for both reco (x) and truth (z)
-    levels.
+    Compute per-feature mean/std after log transform from the sim parquet
+    files, for both reco (x) and truth (z) levels.
 
     Usage:
         python -c "
@@ -407,28 +348,15 @@ def compute_shift_scale(path_sim: str, num: Optional[int] = None, seed: int = 42
     eps = 1e-3
 
     paths = _resolve_paths(path_sim)
-    available = _available_columns(paths)
-    has_bjet_reco = RECO_BRANCHES_MULTI["bjet_pt"] in available
-    has_bjet_truth = PARTICLE_BRANCHES_MULTI["bjet_pt"] in available
-
     columns = _needed_columns_multi(RECO_BRANCHES_MULTI, include_weight=False)
-    if not has_bjet_reco:
-        columns = [c for c in columns if c != RECO_BRANCHES_MULTI["bjet_pt"]]
-    truth_cols = _needed_columns_multi(PARTICLE_BRANCHES_MULTI)
-    if not has_bjet_truth:
-        truth_cols = [c for c in truth_cols if c != PARTICLE_BRANCHES_MULTI["bjet_pt"]]
-    columns += truth_cols
+    columns += _needed_columns_multi(PARTICLE_BRANCHES_MULTI)
     columns = list(dict.fromkeys(columns))
 
     arrays, _ = _load_arrays_multi(paths, columns, num=num, seed=seed)
     n_events = len(arrays)
 
-    x, _ = _extract_scalar_features(
-        arrays, RECO_BRANCHES_MULTI, n_events, drop_invalid=False, has_bjet=has_bjet_reco
-    )
-    z, valid_z = _extract_scalar_features(
-        arrays, PARTICLE_BRANCHES_MULTI, n_events, drop_invalid=True, has_bjet=has_bjet_truth
-    )
+    x, _ = _extract_scalar_features(arrays, RECO_BRANCHES_MULTI, n_events, drop_invalid=False)
+    z, valid_z = _extract_scalar_features(arrays, PARTICLE_BRANCHES_MULTI, n_events, drop_invalid=True)
 
     n_dropped = (~valid_z).sum().item()
     if n_dropped > 0:
@@ -462,95 +390,95 @@ class WWbbMultiProcess:
 
     transforms: Tuple[Callable] = (
         WWbbMultiTransform(
-            shift_x=torch.tensor([4.8091, 4.4381, 4.0437, 4.2637, 5.8316, -0.0007, -0.0, 4.4389]),
-            scale_x=torch.tensor([0.4682, 0.402, 0.7365, 0.41, 2.2003, 2.2351, 1.9978, 0.5334]),
-            shift_z=torch.tensor([4.837, 4.4725, 3.8872, 4.2691, 5.1193, -0.0006, 0.0009, 4.4478]),
-            scale_z=torch.tensor([0.4591, 0.4076, 0.7767, 0.4099, 1.4871, 2.2331, 1.9842, 1.3517]),
+            shift_x=torch.tensor([4.2637, 4.7416, 4.809, 5.4326, 4.4378, 5.106, 4.1289, 4.8796]),
+            scale_x=torch.tensor([0.4099, 0.5975, 0.468, 0.7693, 0.4018, 0.7723, 0.3284, 0.82]),
+            shift_z=torch.tensor([4.2691, 4.7469, 4.837, 5.4406, 4.4723, 5.1132, 4.1261, 4.8485]),
+            scale_z=torch.tensor([0.4098, 0.5971, 0.4589, 0.7488, 0.4074, 0.7497, 0.3686, 0.8001]),
         ),
     )
 
     observables_x: Tuple[Observable] = (
         Observable(
-            name="j1_pt", compute=lambda x: x[..., 0],
-            label=r"Leading jet $p_T$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
-            log_bins=True,
-        ),
-        Observable(
-            name="j2_pt", compute=lambda x: x[..., 1],
-            label=r"Subleading jet $p_T$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
-            log_bins=True,
-        ),
-        Observable(
-            name="met_pt", compute=lambda x: x[..., 2],
-            label=r"$E_T^{\rm miss}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
-            log_bins=True,
-        ),
-        Observable(
-            name="mu_pt", compute=lambda x: x[..., 3],
+            name="mu_pt", compute=lambda x: x[..., 0],
             label=r"$p_{T,\mu}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
             log_bins=True,
         ),
         Observable(
-            name="n_jets", compute=lambda x: x[..., 4],
-            label=r"$N_{\rm jets}$", discrete=1, xlims=(0, 12),
-            log_bins=False,
+            name="mu_e", compute=lambda x: x[..., 1],
+            label=r"$E_{\mu}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
         ),
         Observable(
-            name="dphi_mu_j1", compute=lambda x: x[..., 5],
-            label=r"$\Delta\phi(\mu, j_1)$", xlims=(-np.pi, np.pi),
-            log_bins=False,
+            name="j1_pt", compute=lambda x: x[..., 2],
+            label=r"Leading jet $p_T$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
         ),
         Observable(
-            name="dphi_mu_j2", compute=lambda x: x[..., 6],
-            label=r"$\Delta\phi(\mu, j_2)$", xlims=(-np.pi, np.pi),
-            log_bins=False,
+            name="j1_e", compute=lambda x: x[..., 3],
+            label=r"Leading jet $E$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
         ),
         Observable(
-            name="bjet_pt", compute=lambda x: x[..., 7],
-            label=r"Leading $b$-jet $p_T$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            name="j2_pt", compute=lambda x: x[..., 4],
+            label=r"Subleading jet $p_T$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
+        ),
+        Observable(
+            name="j2_e", compute=lambda x: x[..., 5],
+            label=r"Subleading jet $E$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
+        ),
+        Observable(
+            name="j3_pt", compute=lambda x: x[..., 6],
+            label=r"3rd jet $p_T$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
+        ),
+        Observable(
+            name="j3_e", compute=lambda x: x[..., 7],
+            label=r"3rd jet $E$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
             log_bins=True,
         ),
     )
 
     observables_z: Tuple[Observable] = (
         Observable(
-            name="j1_pt_truth", compute=lambda z: z[..., 0],
-            label=r"Leading jet $p_T^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
-            log_bins=True,
-        ),
-        Observable(
-            name="j2_pt_truth", compute=lambda z: z[..., 1],
-            label=r"Subleading jet $p_T^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
-            log_bins=True,
-        ),
-        Observable(
-            name="met_pt_truth", compute=lambda z: z[..., 2],
-            label=r"$E_T^{\rm miss,truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
-            log_bins=True,
-        ),
-        Observable(
-            name="mu_pt_truth", compute=lambda z: z[..., 3],
+            name="mu_pt_truth", compute=lambda z: z[..., 0],
             label=r"$p_{T,\mu}^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
             log_bins=True,
         ),
         Observable(
-            name="n_jets_truth", compute=lambda z: z[..., 4],
-            label=r"$N_{\rm jets}^{\rm truth}$", discrete=1, xlims=(0, 12),
-            log_bins=False,
+            name="mu_e_truth", compute=lambda z: z[..., 1],
+            label=r"$E_{\mu}^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
         ),
         Observable(
-            name="dphi_mu_j1_truth", compute=lambda z: z[..., 5],
-            label=r"$\Delta\phi(\mu, j_1)^{\rm truth}$", xlims=(-np.pi, np.pi),
-            log_bins=False,
+            name="j1_pt_truth", compute=lambda z: z[..., 2],
+            label=r"Leading jet $p_T^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
         ),
         Observable(
-            name="dphi_mu_j2_truth", compute=lambda z: z[..., 6],
-            label=r"$\Delta\phi(\mu, j_2)^{\rm truth}$", xlims=(-np.pi, np.pi),
-            log_bins=False,
+            name="j1_e_truth", compute=lambda z: z[..., 3],
+            label=r"Leading jet $E^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
         ),
         Observable(
-            name="bjet_pt_truth", compute=lambda z: z[..., 7],
-            label=r"Leading $b$-jet $p_T^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            name="j2_pt_truth", compute=lambda z: z[..., 4],
+            label=r"Subleading jet $p_T^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
+        ),
+        Observable(
+            name="j2_e_truth", compute=lambda z: z[..., 5],
+            label=r"Subleading jet $E^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
+        ),
+        Observable(
+            name="j3_pt_truth", compute=lambda z: z[..., 6],
+            label=r"3rd jet $p_T^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
+            log_bins=True,
+        ),
+        Observable(
+            name="j3_e_truth", compute=lambda z: z[..., 7],
+            label=r"3rd jet $E^{\rm truth}$ [GeV]", qlims=(1e-3, 1 - 1e-3), logy=True,
             log_bins=True,
         ),
     )
