@@ -90,7 +90,7 @@ def add_atlas_label(
     subtext:      str = "Work in progress",
     atlas_second: str = None,
     x: float = 0.05,
-    y: float = 0.90,
+    y: float = 0.98,
     fontsize: float = ATLAS_LABEL_FONTSIZE,
 ):
     """Draw the ATLAS badge + status + description lines in the top-left
