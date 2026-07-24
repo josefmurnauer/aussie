@@ -73,10 +73,33 @@ class UnfoldingExperiment(TrainingExperiment):
         lw_z_sim = record["lw_z_sim"]       # [1, N_sim]  already has MC weights from evaluate()
         lw_x     = record_cls["lw_x"]       # [1, N_all]  raw logits, NO MC weights
 
-        try:
-            lw_x_sim = lw_x[..., mask_sim.numpy()].mean(0)   # [N_sim]
-        except IndexError:
-            self.log.info("Skipping classifier weights due to mismatched shapes")
+        # ----------------------------------------------------------------
+        # The classifier's saved predictions (record_cls) may not match
+        # the size of the CURRENT unfolder run's test set -- e.g. if the
+        # classifier was trained/evaluated with a different num_sim/
+        # num_data, or before a real-data population was added/removed.
+        # Detect this once and gate BOTH the reweighting-curve usage AND
+        # the classifier-score/AUC plot on it, to avoid a crash later.
+        # ----------------------------------------------------------------
+        classifier_shapes_match = (lw_x.shape[-1] == len(labels))
+
+        if classifier_shapes_match:
+            try:
+                lw_x_sim = lw_x[..., mask_sim.numpy()].mean(0)   # [N_sim]
+            except IndexError:
+                self.log.info("Skipping classifier weights due to mismatched shapes")
+                lw_x_sim = None
+                classifier_shapes_match = False
+        else:
+            self.log.info(
+                f"Classifier predictions size ({lw_x.shape[-1]}) does not "
+                f"match current test set size ({len(labels)}) -- skipping "
+                f"classifier weights and the classifier-score/AUC plot. "
+                f"This usually means the classifier was trained/evaluated "
+                f"with a different dataset configuration (num_sim/num_data, "
+                f"or a different data population) than the current "
+                f"unfolder run."
+            )
             lw_x_sim = None
 
         # ----------------------------------------------------------------
@@ -332,37 +355,47 @@ class UnfoldingExperiment(TrainingExperiment):
                     pdf.savefig(fig)
                     plt.close(fig)
 
-            # ---- classifier score plot ------------------------------------
-            labels         = labels.int().numpy()
-            wz             = np.exp(lw_z_sim).mean(0)
-            lw_x_mean      = lw_x.mean(0)
-            preds          = expit(lw_x_mean)
-            sample_weights = np.ones(len(labels))
-            sample_weights[labels == 0] = wz
-            if exp_weights is not None:
-                sample_weights[labels == 1] = exp_weights
+            # ---- classifier score plot -------------------------------------
+            # Only meaningful/possible if the classifier's saved predictions
+            # actually match the current test set (see classifier_shapes_match
+            # computed above). Otherwise skip entirely rather than crash.
+            if classifier_shapes_match:
+                labels_np      = labels.int().numpy()
+                wz             = np.exp(lw_z_sim).mean(0)
+                lw_x_mean      = lw_x.mean(0)
+                preds          = expit(lw_x_mean)
+                sample_weights = np.ones(len(labels_np))
+                sample_weights[labels_np == 0] = wz
+                if exp_weights is not None:
+                    sample_weights[labels_np == 1] = exp_weights
 
-            fig, ax = plotting.plot_reweighting(
-                exp=lw_x_mean[mask_dat],
-                sim=lw_x_mean[mask_sim],
-                weights_list=[wz],
-                variance_list=[variance_list[0]],
-                names_list=[names_list[0]],
-                figsize=np.array([1, 5 / 6]) * pw / 2,
-                num_bins=pcfg.num_bins,
-                discrete=obs.discrete,
-                exp_weights=exp_weights,
-                sim_weights=sim_weights,        # <- Sim histogram weighted
-                xlabel=r"$\log R_\theta(x)$",
-                logy=True,
-                qlims=(1e-5, 1 - 1e-5),
-                density=True,
-                ratio_lims=(0.6, 1.4),
-            )
+                fig, ax = plotting.plot_reweighting(
+                    exp=lw_x_mean[mask_dat],
+                    sim=lw_x_mean[mask_sim],
+                    weights_list=[wz],
+                    variance_list=[variance_list[0]],
+                    names_list=[names_list[0]],
+                    figsize=np.array([1, 5 / 6]) * pw / 2,
+                    num_bins=pcfg.num_bins,
+                    discrete=obs.discrete,
+                    exp_weights=exp_weights,
+                    sim_weights=sim_weights,        # <- Sim histogram weighted
+                    xlabel=r"$\log R_\theta(x)$",
+                    logy=True,
+                    qlims=(1e-5, 1 - 1e-5),
+                    density=True,
+                    ratio_lims=(0.6, 1.4),
+                )
 
-            plt.subplots_adjust(top=0.9)
-            auc = roc_auc_score(labels, preds, sample_weight=sample_weights)
-            fig.suptitle(f"AUC = {auc:.5f}")
+                plt.subplots_adjust(top=0.9)
+                auc = roc_auc_score(labels_np, preds, sample_weight=sample_weights)
+                fig.suptitle(f"AUC = {auc:.5f}")
 
-            pdf.savefig(fig)
-            plt.close(fig)
+                pdf.savefig(fig)
+                plt.close(fig)
+            else:
+                self.log.info(
+                    "Skipping classifier-score/AUC plot due to mismatched "
+                    "shapes between classifier predictions and current "
+                    "test set."
+                )
