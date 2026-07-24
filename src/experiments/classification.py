@@ -11,6 +11,7 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from src.experiments.training import TrainingExperiment
+from src.utils.metrics import compute_observable_metrics, save_metrics_pdf
 
 
 class ClassificationExperiment(TrainingExperiment):
@@ -328,3 +329,33 @@ class ClassificationExperiment(TrainingExperiment):
 
             pdf.savefig(fig)
             plt.close(fig)
+
+        # ----------------------------------------------------------------
+        # Evaluation metrics summary (chi2, Wasserstein, MSE per observable)
+        # ----------------------------------------------------------------
+        self.log.info("Computing evaluation metrics")
+        weights_list_metrics = [np.exp(lw_x_sim)] if lw_x_sim is not None else []
+        names_list_metrics = ["Classifier"] if lw_x_sim is not None else []
+
+        obs_names_x, metrics_x = compute_observable_metrics(
+            self.process.observables_x,
+            x_dat, x_sim,
+            exp_weights, sim_weights,
+            weights_list_metrics, names_list_metrics,
+            num_bins=pcfg.num_bins,
+            name_sim="MC Simulation Pythia",
+        )
+
+        with PdfPages(os.path.join(savedir, "metrics.pdf")) as pdf:
+            save_metrics_pdf(pdf, obs_names_x, metrics_x, prefix="Reco-level: ")
+
+            if data_has_truth:
+                obs_names_z, metrics_z = compute_observable_metrics(
+                    self.process.observables_z,
+                    z_dat, z_sim,
+                    exp_weights, sim_weights,
+                    weights_list_metrics, names_list_metrics,
+                    num_bins=pcfg.num_bins,
+                    name_sim="MC Simulation Pythia",
+                )
+                save_metrics_pdf(pdf, obs_names_z, metrics_z, prefix="Truth-level: ")

@@ -9,6 +9,7 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from src.experiments.training import TrainingExperiment
+from src.utils.metrics import compute_observable_metrics, save_metrics_pdf
 
 
 class UnfoldingExperiment(TrainingExperiment):
@@ -147,15 +148,23 @@ class UnfoldingExperiment(TrainingExperiment):
         # Build weights list for plotting
         # lw_z_sim already has MC weights -> use directly
         # lw_x_sim now has MC weights added above
+        #
+        # Order: Classifier first (gets the 3rd color slot in the palette),
+        # AUSSIE second (gets the 4th color slot) -- matches desired
+        # Classifier=green, AUSSIE=next-color plotting order.
         # ----------------------------------------------------------------
-        weights_list  = [np.exp(lw_z_sim)]
-        variance_list = [None]
-        names_list    = ["AUSSIE"]
+        weights_list  = []
+        variance_list = []
+        names_list    = []
 
         if lw_x_sim is not None:
             weights_list.append(np.exp(lw_x_sim))
             variance_list.append(None)
             names_list.append("Classifier")
+
+        weights_list.append(np.exp(lw_z_sim))
+        variance_list.append(None)
+        names_list.append("AUSSIE")
 
         # ----------------------------------------------------------------
         # Detect whether the "data" population has particle-level truth
@@ -373,8 +382,8 @@ class UnfoldingExperiment(TrainingExperiment):
                     exp=lw_x_mean[mask_dat],
                     sim=lw_x_mean[mask_sim],
                     weights_list=[wz],
-                    variance_list=[variance_list[0]],
-                    names_list=[names_list[0]],
+                    variance_list=[variance_list[-1]],
+                    names_list=[names_list[-1]],
                     figsize=np.array([1, 5 / 6]) * pw / 2,
                     num_bins=pcfg.num_bins,
                     discrete=obs.discrete,
@@ -399,3 +408,31 @@ class UnfoldingExperiment(TrainingExperiment):
                     "shapes between classifier predictions and current "
                     "test set."
                 )
+
+        # ----------------------------------------------------------------
+        # Evaluation metrics summary (chi2, Wasserstein, MSE per observable)
+        # ----------------------------------------------------------------
+        self.log.info("Computing evaluation metrics")
+
+        obs_names_x, metrics_x = compute_observable_metrics(
+            self.process.observables_x,
+            x_dat, x_sim,
+            exp_weights, sim_weights,
+            weights_list, names_list,   # already built above: Classifier (+ AUSSIE)
+            num_bins=pcfg.num_bins,
+            name_sim="MC Simulation Pythia",
+        )
+
+        with PdfPages(os.path.join(savedir, "metrics.pdf")) as pdf:
+            save_metrics_pdf(pdf, obs_names_x, metrics_x, prefix="Reco-level: ")
+
+            if data_has_truth:
+                obs_names_z, metrics_z = compute_observable_metrics(
+                    self.process.observables_z,
+                    z_dat, z_sim,
+                    exp_weights, sim_weights,
+                    weights_list, names_list,
+                    num_bins=pcfg.num_bins,
+                    name_sim="MC Simulation Pythia",
+                )
+                save_metrics_pdf(pdf, obs_names_z, metrics_z, prefix="Truth-level: ")
