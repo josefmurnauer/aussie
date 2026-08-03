@@ -8,12 +8,6 @@ try:
     import atlas_mpl_style as ampl
     ampl.use_atlas_style()
 
-    # atlas-mpl-style points several font-related rcParams at ATLAS's
-    # preferred font family (Tex Gyre Heros/Chorus/Cursor, i.e. Helvetica/
-    # Zapf Chancery/Courier clones), none of which are installed on this
-    # system. Reset ALL font-related rcParams to matplotlib-bundled
-    # defaults to avoid repeated findfont warnings, while keeping the
-    # rest of the ATLAS style (ticks, spines, etc.) intact.
     _FONT_RESET = {
         "font.family": "sans-serif",
         "font.sans-serif": ["DejaVu Sans"],
@@ -47,8 +41,6 @@ LEGEND_KWARGS = dict(
     markerscale=0.8,
 )
 
-# shrink the overall figure slightly and reserve fixed margins so axis
-# labels are never clipped, regardless of the figsize passed in by callers
 FIGSIZE_SCALE = 0.92
 SUBPLOT_MARGINS = dict(left=0.18, right=0.95, top=0.93, bottom=0.13)
 
@@ -61,11 +53,6 @@ AXIS_LABEL_FONTSIZE = 11
 # ---------------------------------------------------------------------------
 
 def _parse_atlas_status(atlas_label: str):
-    """
-    Map a free-form ATLAS label string (e.g. "Simulation", "Preliminary",
-    "Internal", "Simulation Internal", "") onto atlas-mpl-style's
-    (status, simulation) arguments.
-    """
     label_lower = (atlas_label or "").lower()
     simulation = "simulation" in label_lower
     remainder = label_lower.replace("simulation", "").strip()
@@ -90,11 +77,9 @@ def add_atlas_label(
     subtext:      str = "Work in progress",
     atlas_second: str = None,
     x: float = 0.05,
-    y: float = 0.98,
+    y: float = 0.95,
     fontsize: float = ATLAS_LABEL_FONTSIZE,
 ):
-    """Draw the ATLAS badge + status + description lines in the top-left
-    of the given axis, using atlas-mpl-style."""
     if not HAS_AMPL:
         return
 
@@ -104,22 +89,13 @@ def add_atlas_label(
 
     try:
         ampl.draw_atlas_label(
-            x, y,
-            ax=ax,
-            status=status,
-            simulation=simulation,
-            desc=desc,
+            x, y, ax=ax, status=status, simulation=simulation, desc=desc,
             fontsize=fontsize,
         )
     except TypeError:
-        # installed atlas-mpl-style version may not accept `fontsize`
         try:
             ampl.draw_atlas_label(
-                x, y,
-                ax=ax,
-                status=status,
-                simulation=simulation,
-                desc=desc,
+                x, y, ax=ax, status=status, simulation=simulation, desc=desc,
             )
         except TypeError:
             try:
@@ -131,23 +107,15 @@ def add_atlas_label(
 
 
 # ---------------------------------------------------------------------------
-# Legend helper -- forces the pseudo-data entry to the top, regardless of
-# artist draw order
+# Legend helper -- forces the pseudo-data entry to the top
 # ---------------------------------------------------------------------------
 
 def _legend_with_data_first(ax, name_exp, **legend_kwargs):
-    """Draw the legend with the pseudo-data entry forced to the top,
-    regardless of the order artists were added to the axes."""
     handles, labels = ax.get_legend_handles_labels()
-
-    data_idx = next(
-        (i for i, lab in enumerate(labels) if lab == name_exp), None
-    )
-
+    data_idx = next((i for i, lab in enumerate(labels) if lab == name_exp), None)
     if data_idx is not None and data_idx != 0:
         handles = [handles[data_idx]] + handles[:data_idx] + handles[data_idx + 1:]
         labels = [labels[data_idx]] + labels[:data_idx] + labels[data_idx + 1:]
-
     ax.legend(handles, labels, **legend_kwargs)
 
 
@@ -156,15 +124,11 @@ def _legend_with_data_first(ax, name_exp, **legend_kwargs):
 # ---------------------------------------------------------------------------
 
 def _atlas_ticks(ax):
-    """Apply the standard ATLAS tick style: major+minor ticks, pointing
-    inward, drawn on all four sides of the axis."""
     ax.tick_params(
-        axis="both", which="major",
-        direction="in", top=True, right=True, length=7,
+        axis="both", which="major", direction="in", top=True, right=True, length=7,
     )
     ax.tick_params(
-        axis="both", which="minor",
-        direction="in", top=True, right=True, length=4,
+        axis="both", which="minor", direction="in", top=True, right=True, length=4,
     )
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     if ax.get_yscale() == "linear":
@@ -172,14 +136,6 @@ def _atlas_ticks(ax):
 
 
 def _make_main_ratio_axes(figsize, n_ratios=1):
-    """Create the classic ATLAS main+ratio panel layout: a larger main
-    panel on top, one or more thinner ratio panels below, sharing the
-    x-axis, with zero vertical spacing between them.
-
-    The figure is shrunk slightly (FIGSIZE_SCALE) and fixed margins are
-    reserved (SUBPLOT_MARGINS) so axis labels are never clipped, regardless
-    of the figsize passed in by the caller.
-    """
     scaled_figsize = (figsize[0] * FIGSIZE_SCALE, figsize[1] * FIGSIZE_SCALE)
 
     fig = plt.figure(figsize=scaled_figsize, constrained_layout=False)
@@ -209,9 +165,6 @@ def _make_main_ratio_axes(figsize, n_ratios=1):
 
 
 def _bin_width_label(bins, log_bins, discrete, density):
-    """Build a y-axis label following the ATLAS convention of stating the
-    bin width, e.g. 'Events / 5 GeV'. Falls back to a generic label for
-    non-uniform (log) binning."""
     if density:
         return "Norm. to unit area"
     if discrete or log_bins:
@@ -225,8 +178,6 @@ def _dup_last(a):
 
 
 def _draw_data(ax, bins, y, err, label, zorder, color="black"):
-    """Draw the 'data'-like curve (index 0) as black markers + error bars,
-    the ATLAS convention for observed data."""
     bin_centers = 0.5 * (bins[1:] + bins[:-1])
     obj = ax.errorbar(
         bin_centers, y, yerr=err,
@@ -237,10 +188,6 @@ def _draw_data(ax, bins, y, err, label, zorder, color="black"):
 
 
 def _draw_mc_filled(ax, bins, y, err, color, label, zorder, alpha=0.25):
-    """Draw the nominal MC/sim curve as a step line with a shaded
-    statistical-uncertainty band -- same visual treatment as the
-    reweighted/classifier curves, just a distinct color. No solid fill
-    under the curve."""
     band_obj = ax.fill_between(
         bins,
         _dup_last(y - err), _dup_last(y + err),
@@ -254,8 +201,6 @@ def _draw_mc_filled(ax, bins, y, err, color, label, zorder, alpha=0.25):
 
 
 def _draw_curve_line(ax, bins, y, err, color, label, zorder, ls="-", lw=1.4):
-    """Draw a reweighted/alternative-hypothesis curve as a solid colored
-    step line with a lighter shaded uncertainty band."""
     band_obj = ax.fill_between(
         bins,
         _dup_last(y - err), _dup_last(y + err),
@@ -288,10 +233,38 @@ def _draw_ratio_curve(ax, bins, ratio, ratio_err, color, ls="-", lw=1.4, zorder=
     )
 
 
+def _compute_pull(y, err, y_exp, err_exp, density):
+    """Per-bin pull of a curve relative to the data/exp histogram:
+        pull = (curve - exp) / sqrt(err_curve^2 + err_exp^2)
+    computed on unit-area-normalized histograms when density=True (to
+    match the same convention used for the chi2/N summary statistic),
+    or on raw counts otherwise. Returns an array with one entry per bin
+    (NaN where undefined, e.g. both histograms empty in that bin)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if density:
+            y_n = y / y.sum()
+            err_n = err / y.sum()
+            y_exp_n = y_exp / y_exp.sum()
+            err_exp_n = err_exp / y_exp.sum()
+            pull = (y_n - y_exp_n) / np.sqrt(err_n ** 2 + err_exp_n ** 2)
+        else:
+            pull = (y - y_exp) / np.sqrt(err ** 2 + err_exp ** 2)
+    return pull
+
+
+def _draw_pull_data_marker(ax, bins, pull, color="black"):
+    """Draw a curve's pull as markers connected by a thin line at bin
+    centers -- used for every non-data curve in the pull panel."""
+    bin_centers = 0.5 * (bins[1:] + bins[:-1])
+    finite = np.isfinite(pull)
+    ax.plot(
+        bin_centers[finite], pull[finite],
+        marker="o", ms=3, lw=1.2, color=color, zorder=4,
+    )
+
+
 def _compute_bins(exp, sim, xlims, qlims, discrete, log_bins, num_bins,
                    logx, exp_weights, sim_weights, weights_list):
-    """Mask NaNs / non-positive values (for log axes), then compute bin
-    edges. Returns the filtered arrays alongside the bins."""
     exp_mask = np.isfinite(exp)
     sim_mask = np.isfinite(sim)
     if exp_weights is not None:
@@ -352,6 +325,7 @@ def plot_reweighting(
     show_sim=True,
     denom_idx=0,
     ratio_lims=(0.85, 1.15),
+    pull_lims=(-5, 5),
     density=False,
     add_chi2=True,
     add_legend=True,
@@ -368,8 +342,9 @@ def plot_reweighting(
         logx, exp_weights, sim_weights, weights_list,
     )
 
-    fig, main_ax, ratio_ax = _make_main_ratio_axes(figsize)
+    fig, main_ax, (ratio_ax, pull_ax) = _make_main_ratio_axes(figsize, n_ratios=2)
     ratio_ax.axhline(1.0, color="gray", lw=1.0, zorder=0)
+    pull_ax.axhline(0.0, color="gray", lw=1.0, zorder=0)
 
     # --- data counts -----------------------------------------------------
     if exp_weights is None:
@@ -390,15 +365,9 @@ def plot_reweighting(
         err_sim = np.sqrt(sum_w2s)
 
     if add_chi2:
-        with np.errstate(divide="ignore", invalid="ignore"):
-            if density:
-                pull_sim = (y_sim / y_sim.sum() - y_exp / y_exp.sum()) / np.sqrt(
-                    (err_sim / y_sim.sum()) ** 2 + (err_exp / y_exp.sum()) ** 2
-                )
-            else:
-                pull_sim = (y_sim - y_exp) / np.sqrt(err_sim ** 2 + err_exp ** 2)
+        pull_sim_for_chi2 = _compute_pull(y_sim, err_sim, y_exp, err_exp, density)
         nonempty_sim = (y_sim != 0) & (y_exp != 0)
-        chi2_sim = (pull_sim[nonempty_sim] ** 2).sum() / num_bins
+        chi2_sim = (pull_sim_for_chi2[nonempty_sim] ** 2).sum() / num_bins
         name_sim_label = f"{name_sim} ($\\chi^2$/N={chi2_sim:.2f})"
     else:
         name_sim_label = name_sim
@@ -434,15 +403,9 @@ def plot_reweighting(
             continue
 
         if add_chi2 and (label in labels_rew):
-            with np.errstate(divide="ignore", invalid="ignore"):
-                if density:
-                    pull = (y / y.sum() - y_exp / y_exp.sum()) / np.sqrt(
-                        (err / y.sum()) ** 2 + (err_exp / y_exp.sum()) ** 2
-                    )
-                else:
-                    pull = (y - y_exp) / np.sqrt(err ** 2 + err_exp ** 2)
+            pull_for_chi2 = _compute_pull(y, err, y_exp, err_exp, density)
             nonempty = (y != 0) & (y_exp != 0)
-            chi2 = (pull[nonempty] ** 2).sum() / num_bins
+            chi2 = (pull_for_chi2[nonempty] ** 2).sum() / num_bins
             label += f" ($\\chi^2$/N={chi2:.2f})"
 
         scale = (
@@ -457,6 +420,9 @@ def plot_reweighting(
             ratio = np.where(denom > 0, y / denom * ratio_scale, np.nan)
             ratio_err = np.where(denom > 0, err / denom * ratio_scale, np.nan)
 
+        # pull relative to data/exp, drawn for every curve except data itself
+        pull = _compute_pull(y, err, y_exp, err_exp, density) if i > 0 else None
+
         if i == 0:
             _draw_data(main_ax, bins, y_s, err_s, label, zorder=6, color="black")
             _draw_ratio_data(ratio_ax, bins, ratio, ratio_err, color="black")
@@ -464,24 +430,30 @@ def plot_reweighting(
         elif i == 1:
             _draw_mc_filled(main_ax, bins, y_s, err_s, color, label, zorder=2)
             _draw_ratio_curve(ratio_ax, bins, ratio, ratio_err, color, zorder=2)
+            _draw_pull_data_marker(pull_ax, bins, pull, color=color)
 
         else:
             _draw_curve_line(main_ax, bins, y_s, err_s, color, label, zorder=4)
             _draw_ratio_curve(ratio_ax, bins, ratio, ratio_err, color, zorder=3)
+            _draw_pull_data_marker(pull_ax, bins, pull, color=color)
 
     if logx:
         main_ax.semilogx()
         ratio_ax.semilogx()
+        pull_ax.semilogx()
     if logy:
         main_ax.semilogy()
 
     ratio_ax.set_ylim(*ratio_lims)
+    pull_ax.set_ylim(*pull_lims)
     main_ax.set_xlim(bins[0], bins[-1])
     ratio_ax.set_xlim(bins[0], bins[-1])
+    pull_ax.set_xlim(bins[0], bins[-1])
 
     main_ax.set_ylabel(_bin_width_label(bins, log_bins, discrete, density), fontsize=AXIS_LABEL_FONTSIZE)
     ratio_ax.set_ylabel(r"$\frac{\mathrm{Data}}{\mathrm{Pred.}}$", fontsize=AXIS_LABEL_FONTSIZE)
-    ratio_ax.set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
+    pull_ax.set_ylabel("Pull", fontsize=AXIS_LABEL_FONTSIZE)
+    pull_ax.set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
 
     if add_legend:
         _legend_with_data_first(main_ax, name_exp, loc="upper right", **LEGEND_KWARGS)
@@ -497,7 +469,7 @@ def plot_reweighting(
             atlas_second=atlas_second,
         )
 
-    return fig, (main_ax, ratio_ax)
+    return fig, (main_ax, ratio_ax, pull_ax)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +498,7 @@ def plot_reweighting_ensemble(
     show_sim=True,
     denom_idx=0,
     ratio_lims=(0.85, 1.15),
+    pull_lims=(-5, 5),
     density=False,
     add_chi2=True,
     exp_weights=None,
@@ -541,8 +514,9 @@ def plot_reweighting_ensemble(
         logx, exp_weights, None, weights_list,
     )
 
-    fig, main_ax, ratio_ax = _make_main_ratio_axes(figsize)
+    fig, main_ax, (ratio_ax, pull_ax) = _make_main_ratio_axes(figsize, n_ratios=2)
     ratio_ax.axhline(1.0, color="gray", lw=1.0, zorder=0)
+    pull_ax.axhline(0.0, color="gray", lw=1.0, zorder=0)
 
     if exp_weights is None:
         exp_weights = np.ones_like(exp)
@@ -601,29 +575,40 @@ def plot_reweighting_ensemble(
             ratio = np.where(denom > 0, y / denom * ratio_scale, np.nan)
             ratio_err = np.where(denom > 0, err / denom * ratio_scale, np.nan)
 
+        pull = _compute_pull(y, err, y_exp, err_exp, density=False) if i > 0 else None
+        # note: y_exp/y_sim/y_rew here are ALREADY density-normalized above
+        # when density=True, so pass density=False to _compute_pull to
+        # avoid double-normalizing
+
         if i == 0:
             _draw_data(main_ax, bins, y, err, label, zorder=6, color="black")
             _draw_ratio_data(ratio_ax, bins, ratio, ratio_err, color="black")
         elif i == 1:
             _draw_mc_filled(main_ax, bins, y, err, color, label, zorder=2)
             _draw_ratio_curve(ratio_ax, bins, ratio, ratio_err, color, zorder=2)
+            _draw_pull_data_marker(pull_ax, bins, pull, color=color)
         else:
             _draw_curve_line(main_ax, bins, y, err, color, label, zorder=4)
             _draw_ratio_curve(ratio_ax, bins, ratio, ratio_err, color, zorder=3)
+            _draw_pull_data_marker(pull_ax, bins, pull, color=color)
 
     if logx:
         main_ax.semilogx()
         ratio_ax.semilogx()
+        pull_ax.semilogx()
     if logy:
         main_ax.semilogy()
 
     ratio_ax.set_ylim(*ratio_lims)
+    pull_ax.set_ylim(*pull_lims)
     main_ax.set_xlim(bins[0], bins[-1])
     ratio_ax.set_xlim(bins[0], bins[-1])
+    pull_ax.set_xlim(bins[0], bins[-1])
 
     main_ax.set_ylabel(_bin_width_label(bins, log_bins, discrete, density), fontsize=AXIS_LABEL_FONTSIZE)
     ratio_ax.set_ylabel(r"$\frac{\mathrm{Data}}{\mathrm{Pred.}}$", fontsize=AXIS_LABEL_FONTSIZE)
-    ratio_ax.set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
+    pull_ax.set_ylabel("Pull", fontsize=AXIS_LABEL_FONTSIZE)
+    pull_ax.set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
 
     if add_legend:
         _legend_with_data_first(main_ax, name_exp, loc="upper right", **LEGEND_KWARGS)
@@ -639,7 +624,7 @@ def plot_reweighting_ensemble(
             atlas_second=atlas_second,
         )
 
-    return fig, (main_ax, ratio_ax)
+    return fig, (main_ax, ratio_ax, pull_ax)
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +655,7 @@ def plot_reweighting_multi_ratio(
     show_sim=True,
     denom_idx=0,
     ratio_lims=(0.85, 1.15),
+    pull_lims=(-5, 5),
     density=False,
     add_chi2=True,
     exp_weights=None,
@@ -683,15 +669,22 @@ def plot_reweighting_multi_ratio(
     add_atlas:     bool = True,
 ):
     num_ratios = int(np.max(ratio_idx) + 1)
+    # one extra panel at the bottom, dedicated to the pull of every
+    # non-data curve relative to data (aggregated across all curves,
+    # regardless of which ratio_idx group they belong to)
+    total_panels = num_ratios + 1
+    pull_panel_idx = num_ratios  # last panel
 
     exp, sim, exp_weights, _, weights_list, bins = _compute_bins(
         exp, sim, xlims, qlims, discrete, log_bins, num_bins,
         logx, exp_weights, None, weights_list,
     )
 
-    fig, main_ax, ratio_axes = _make_main_ratio_axes(figsize, n_ratios=num_ratios)
-    for ax in ratio_axes:
+    fig, main_ax, ratio_axes = _make_main_ratio_axes(figsize, n_ratios=total_panels)
+    for ax in ratio_axes[:num_ratios]:
         ax.axhline(1.0, color="gray", lw=1.0, zorder=0)
+    pull_ax = ratio_axes[pull_panel_idx]
+    pull_ax.axhline(0.0, color="gray", lw=1.0, zorder=0)
 
     if exp_weights is None:
         exp_weights = np.ones_like(exp)
@@ -751,6 +744,10 @@ def plot_reweighting_multi_ratio(
             ratio = np.where(denom > 0, y / denom * ratio_scale, np.nan)
             ratio_err = np.where(denom > 0, err / denom * ratio_scale, np.nan)
 
+        pull = _compute_pull(y, err, y_exp, err_exp, density=False) if i > 0 else None
+        # note: y_exp/y_sim/y_rew are already density-normalized above when
+        # density=True, so pass density=False to _compute_pull here
+
         if i == 0:
             _draw_data(main_ax, bins, y, err, label, zorder=6, color="black")
             for ir in range(num_ratios):
@@ -762,12 +759,14 @@ def plot_reweighting_multi_ratio(
             for ir in range(num_ratios):
                 if ir in ratio_idcs[i]:
                     _draw_ratio_curve(ratio_axes[ir], bins, ratio, ratio_err, color, zorder=2)
+            _draw_pull_data_marker(pull_ax, bins, pull, color=color)
 
         else:
             _draw_curve_line(main_ax, bins, y, err, color, label, zorder=4)
             for ir in range(num_ratios):
                 if ir in ratio_idcs[i]:
                     _draw_ratio_curve(ratio_axes[ir], bins, ratio, ratio_err, color, zorder=3)
+            _draw_pull_data_marker(pull_ax, bins, pull, color=color)
 
     if logx:
         main_ax.semilogx()
@@ -790,6 +789,10 @@ def plot_reweighting_multi_ratio(
             rf"$\frac{{\mathrm{{{ratio_names[ir]}}}}}{{\mathrm{{Data}}}}$",
             fontsize=AXIS_LABEL_FONTSIZE,
         )
+
+    pull_ax.set_ylim(*pull_lims)
+    pull_ax.set_xlim(bins[0], bins[-1])
+    pull_ax.set_ylabel("Pull", fontsize=AXIS_LABEL_FONTSIZE)
 
     ratio_axes[-1].set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
 
