@@ -78,6 +78,16 @@ class TrainingExperiment(BaseExperiment):
 
         # make plots
         if self.cfg.plot:
+            # model needed for plot() (e.g. UnfoldingExperiment.plot() reads
+            # self.model.cls_path). If neither train nor evaluate ran in this
+            # invocation (e.g. a plot-only rerun via prev_exp_dir with
+            # train=false evaluate=false), the model was never initialized --
+            # do it now, without loading trained weights, since plot() only
+            # needs config-level attributes (like cls_path) and reads
+            # predictions/data from disk directly rather than running the
+            # model itself.
+            if not hasattr(self, "model"):
+                self.init_model()
             self.log.info("Making plots")
             self.plot()
 
