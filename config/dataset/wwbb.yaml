@@ -5,9 +5,10 @@ reader:
   path_data: /scratch/mjosef/Unfolding/aussie/data/pseudodata
   #path_data: /scratch/mjosef/Unfolding/aussie/data/data
   max_jets: 6
-  num_sim: 3000000
-  num_data: 3000000
+  num_sim: 2000000
+  num_data: 2000000
   normalize: false
   seed: 42
+  include_tagging: true
 process:
   _target_: src.datasets.WWbbProcess
