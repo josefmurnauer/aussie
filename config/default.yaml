@@ -8,7 +8,7 @@ use_gpu: True
 device: 3
 use_tf32: True
 use_amp: False
-num_cpus: 0
+num_cpus: 16
 dry_run: False
 submit: False
 run_dir: runs
