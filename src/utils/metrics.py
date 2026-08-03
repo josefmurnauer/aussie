@@ -26,11 +26,6 @@ def _filter_finite(exp, curve, exp_weights, curve_weights):
 
 def compute_chi2(exp, curve, exp_weights=None, curve_weights=None,
                   num_bins=45, qlims=(0.005, 0.995), xlims=None):
-    """
-    Chi2/N between the (unit-area-normalized) binned data and curve
-    histograms, using the same pull definition as in the main plotting
-    routines: pull = (curve - exp) / sqrt(err_curve^2 + err_exp^2).
-    """
     exp, curve, exp_weights, curve_weights = _filter_finite(
         exp, curve, exp_weights, curve_weights
     )
@@ -77,12 +72,6 @@ def compute_chi2(exp, curve, exp_weights=None, curve_weights=None,
 
 
 def compute_wasserstein(exp, curve, exp_weights=None, curve_weights=None):
-    """
-    Wasserstein-1 (earth mover's) distance between the data and curve
-    distributions, computed directly on unbinned samples (weighted if
-    weights are given). No binning choice needed -- this is an exact
-    metric on the empirical distributions.
-    """
     exp, curve, exp_weights, curve_weights = _filter_finite(
         exp, curve, exp_weights, curve_weights
     )
@@ -98,10 +87,6 @@ def compute_wasserstein(exp, curve, exp_weights=None, curve_weights=None):
 
 def compute_mse(exp, curve, exp_weights=None, curve_weights=None,
                  num_bins=45, qlims=(0.005, 0.995), xlims=None):
-    """
-    Mean squared error between the (unit-area-normalized) binned data and
-    curve histograms -- a simpler, error-agnostic companion to chi2.
-    """
     exp, curve, exp_weights, curve_weights = _filter_finite(
         exp, curve, exp_weights, curve_weights
     )
@@ -128,8 +113,7 @@ def compute_mse(exp, curve, exp_weights=None, curve_weights=None,
 
 
 # ---------------------------------------------------------------------------
-# Orchestration: compute all three metrics for every observable, for the
-# raw sim curve plus every reweighted curve in weights_list/names_list
+# Orchestration
 # ---------------------------------------------------------------------------
 
 def compute_observable_metrics(
@@ -143,27 +127,6 @@ def compute_observable_metrics(
     num_bins=45,
     name_sim="MC Simulation Pythia",
 ):
-    """
-    Parameters
-    ----------
-    observables : iterable of Observable
-    exp_data, sim_data : torch.Tensor
-        Raw (un-transformed) data/pseudodata and sim tensors, as passed to
-        obs.compute(...) elsewhere in plot().
-    exp_weights, sim_weights : np.ndarray or None
-        Per-event weights for the data and raw-sim curves.
-    weights_list, names_list : list
-        The same reweighting-curve weights/names used in the main
-        plot_reweighting(...) calls (e.g. [classifier_weight] /
-        ["Classifier"], or [aussie_weight, classifier_weight] /
-        ["AUSSIE", "Classifier"]).
-
-    Returns
-    -------
-    obs_names : list[str]
-    metrics   : dict with keys "chi2", "wasserstein", "mse", each mapping
-                to {curve_name: [value_per_observable]}
-    """
     obs_names = []
     curve_names = [name_sim] + list(names_list)
 
@@ -203,6 +166,23 @@ def compute_observable_metrics(
     return obs_names, metrics
 
 
+def _flatten_metrics_dict(metrics_to_save):
+    """Flatten the nested {level: {"names": [...], metric: {curve: [...]}}}
+    structure into a flat dict of numpy arrays suitable for np.savez,
+    using '/'-joined keys, e.g. 'observables_x/chi2/Classifier'."""
+    flat = {}
+    for level, level_dict in metrics_to_save.items():
+        names = level_dict["names"]
+        flat[f"{level}/names"] = np.array(names, dtype=object)
+        for metric_name in ("chi2", "wasserstein", "mse"):
+            if metric_name not in level_dict:
+                continue
+            for curve_name, values in level_dict[metric_name].items():
+                key = f"{level}/{metric_name}/{curve_name}"
+                flat[key] = np.array(values, dtype=float)
+    return flat
+
+
 # ---------------------------------------------------------------------------
 # Bar plot
 # ---------------------------------------------------------------------------
@@ -217,19 +197,6 @@ def plot_metric_bars(
     logy=False,
     hline=None,
 ):
-    """
-    Grouped bar chart: one group of bars per observable (x-axis), one bar
-    per curve within each group, height = metric value.
-
-    Parameters
-    ----------
-    metric_values : dict {curve_name: [value_per_observable]}
-    obs_names : list[str]
-    hline : float or None
-        If given, draw a horizontal dashed black reference line at this
-        y-value (e.g. 1.0 for chi2/N, marking the statistically optimal
-        value).
-    """
     fig, ax = plt.subplots(figsize=figsize)
 
     curve_names = list(metric_values.keys())
@@ -271,13 +238,11 @@ def plot_metric_bars(
 
 
 def save_metrics_pdf(pdf, obs_names, metrics, prefix=""):
-    """Write the three metric bar-chart pages (chi2, Wasserstein, MSE)
-    into an already-open PdfPages object."""
     fig, ax = plot_metric_bars(
         metrics["chi2"], obs_names,
         ylabel=r"$\chi^2/N$",
         title=f"{prefix}Chi-squared per observable",
-        hline=1.0,   # chi2/N == 1 is the statistically optimal value
+        hline=1.0,
     )
     pdf.savefig(fig)
     plt.close(fig)
