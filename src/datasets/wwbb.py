@@ -71,9 +71,6 @@ MEV_TO_GEV = 1e-3
 def _resolve_paths(path):
     """Accept a single parquet file, a directory of parquet chunks, or a
     list/tuple mixing either, and return a flat sorted list of file paths.
-
-    This is what lets WWbbData.read() be pointed directly at e.g.
-    '.../Run3/sim' or '.../Run3/data' without listing files by hand.
     """
     if isinstance(path, (list, tuple)):
         resolved = []
@@ -90,16 +87,7 @@ def _resolve_paths(path):
 
 def _available_columns(paths):
     """Return the set of column names available in the parquet file(s) for
-    a given population. Only the first file is inspected, assuming a
-    consistent schema across all chunk files belonging to the same
-    population (true for files produced by our ROOT->parquet converter).
-
-    This is what allows WWbbData.read() to automatically detect whether
-    particle-level truth branches and/or the MC weight branch exist for a
-    given population -- e.g. real collision data will have neither, while
-    MC sim/pseudodata will have both -- without needing to hardcode this
-    based on population index.
-    """
+    a given population, by inspecting the schema of the first file."""
     return set(pq.ParquetFile(paths[0]).schema_arrow.names)
 
 
@@ -151,21 +139,23 @@ def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_
     (reco/truth).
 
     Token layout: [muon, met, jet_0, ..., jet_{max_jets-1}]
-    Feature layout: [E, px, py, pz, is_mu, is_met, is_jet, (tagging scores...)]
+    Feature layout:
+        [E, px, py, pz, is_mu, is_met, is_jet, jet_pt, (tagging scores...)]
 
-    All pt/energy quantities are converted from MeV (raw ntuple units) to GeV.
+    `jet_pt` is included as an auxiliary SCALAR channel (in addition to
+    being part of the 4-vector), analogous to how the GN2 tagging scores
+    are provided -- giving the network direct access to the magnitude
+    without needing to reconstruct it from the geometric input. It is
+    zero for non-jet tokens (muon, MET, padded jet slots), matching the
+    zero-padding convention used for the GN2 scores.
 
-    Some branches (most notably particle-level muon kinematics) can contain
-    NaN for a small fraction of events -- e.g. when the truth-level lepton
-    isn't actually a muon (electron/tau truth lepton in an event that still
-    passed reco-level muon selection). `valid` marks events where ALL
-    features are finite.
+    All pt/energy quantities are converted from MeV (raw ntuple units) to
+    GeV.
 
-    If `drop_invalid` is True, non-finite events are left as NaN in the
-    returned tensor (caller is expected to filter using `valid` before use).
-    If False, non-finite values are replaced with 0.0 in place (safe
-    default for reco-level data, which should not contain NaNs in practice
-    but gets a defensive fallback regardless).
+    Some branches (most notably particle-level muon kinematics) can
+    contain NaN for a small fraction of events -- e.g. when the truth-level
+    lepton isn't actually a muon. `valid` marks events where ALL features
+    are finite.
     """
     n_tokens = 2 + max_jets
 
@@ -182,8 +172,9 @@ def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_
     assert met_4vec.shape == (n_events, 4), f"met_4vec shape mismatch: {met_4vec.shape}"
 
     n_jets = ak.num(arrays[branch_map["jet_pt"]]).to_numpy()
+    jets_pt_padded = _pad(arrays[branch_map["jet_pt"]], max_jets, scale=MEV_TO_GEV)
     jets_4vec = _to_cartesian(
-        _pad(arrays[branch_map["jet_pt"]], max_jets, scale=MEV_TO_GEV),
+        jets_pt_padded,
         _pad(arrays[branch_map["jet_eta"]], max_jets),
         _pad(arrays[branch_map["jet_phi"]], max_jets),
         _pad(arrays[branch_map["jet_e"]], max_jets, scale=MEV_TO_GEV),
@@ -203,21 +194,25 @@ def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_
         pu   = _pad(arrays[branch_map["jet_gn2_pu"]], max_jets)
         ptau = _pad(arrays[branch_map["jet_gn2_ptau"]], max_jets)
 
-        n_scalars = 3 + N_JET_TAGGING_SCORES
+        # scalar layout: [is_mu, is_met, is_jet, jet_pt, pb, pc, pu, ptau]
+        n_scalars = 4 + N_JET_TAGGING_SCORES
         scalars = np.zeros((n_events, n_tokens, n_scalars), dtype=np.float32)
         scalars[:, 0, 0] = 1.0
         scalars[:, 1, 1] = 1.0
         scalars[:, 2:, 2] = 1.0
-        scalars[:, 2:, 3] = pb
-        scalars[:, 2:, 4] = pc
-        scalars[:, 2:, 5] = pu
-        scalars[:, 2:, 6] = ptau
+        scalars[:, 2:, 3] = jets_pt_padded
+        scalars[:, 2:, 4] = pb
+        scalars[:, 2:, 5] = pc
+        scalars[:, 2:, 6] = pu
+        scalars[:, 2:, 7] = ptau
     else:
-        n_scalars = 3
+        # scalar layout: [is_mu, is_met, is_jet, jet_pt]
+        n_scalars = 4
         scalars = np.zeros((n_events, n_tokens, n_scalars), dtype=np.float32)
         scalars[:, 0, 0] = 1.0
         scalars[:, 1, 1] = 1.0
         scalars[:, 2:, 2] = 1.0
+        scalars[:, 2:, 3] = jets_pt_padded
 
     features = np.concatenate([momenta, scalars], axis=-1)
 
@@ -258,22 +253,14 @@ def _load_arrays(paths, columns, num=None, seed=42):
     optionally drawing a random subset of `num` events uniformly
     across ALL files rather than taking the first `num` events.
 
-    Random sampling ensures all DSIDs (e.g. ttbar + singletop) are
-    proportionally represented even when num << total events.
-
     Returns
     -------
     arrays : ak.Array
-        The (possibly subsampled) event array.
     weight_scale : float
         Compensation factor (total / num_sampled) intended to be
         multiplied onto the event weight branch so that the SUM of
         weights in the subsample remains an unbiased estimator of the
-        full-sample weight sum. Without this, two populations subsampled
-        at different retained fractions (e.g. sim vs data drawn from
-        pools of very different total size) end up with mismatched
-        relative normalization even though each individual weight value
-        itself is untouched by the sampling.
+        full-sample weight sum.
     """
     if len(paths) == 1:
         arrays = ak.from_parquet(paths[0], columns=columns)
@@ -288,7 +275,7 @@ def _load_arrays(paths, columns, num=None, seed=42):
     if num is not None and num < total:
         rng = np.random.default_rng(seed)
         indices = rng.choice(total, size=num, replace=False)
-        indices.sort()  # sorted access is much faster for parquet/awkward
+        indices.sort()
         arrays = arrays[indices]
         weight_scale = total / num
         log.info(
@@ -320,21 +307,17 @@ class WWbbData(UnfoldingData):
         device: Optional[torch.device] = None,
         num_sim: Optional[int] = None,
         num_data: Optional[int] = None,
-        num: Optional[int] = None,       # backwards compatibility
+        num: Optional[int] = None,
         normalize: bool = False,
-        seed: int = 42,                   # random sampling seed
+        seed: int = 42,
+        include_tagging: bool = True,
     ):
         """
-        path_data may point at either:
-          - Herwig pseudodata (MC, has both particle-level truth and
-            weight_total_NOSYS), or
-          - real collision data (has neither).
-
-        Truth/weight availability is detected automatically per population
-        by inspecting the parquet schema -- no config flag needed, and no
-        assumption is made that population index 0 vs 1 determines this.
+        path_data may point at either Herwig pseudodata (MC, has truth +
+        weight_total_NOSYS) or real collision data (has neither).
+        Availability is detected automatically per population by
+        inspecting the parquet schema.
         """
-        # backwards compatibility
         if num is not None:
             if num_sim is None:
                 num_sim = num
@@ -370,22 +353,18 @@ class WWbbData(UnfoldingData):
             # ---------------- RECO LEVEL ----------------
             features_x, mask_x, _ = _build_tokens(
                 arrays, RECO_BRANCHES, max_jets, n_events,
-                include_tagging=True, drop_invalid=False,
+                include_tagging=include_tagging, drop_invalid=False,
             )
 
             # ---------------- PARTICLE LEVEL ----------------
             if has_truth:
-                # drop events with invalid truth muon (e.g. non-muon truth
-                # lepton); irrelevant for a population without truth at all
                 features_z, mask_z, valid_z = _build_tokens(
                     arrays, PARTICLE_BRANCHES, max_jets, n_events,
                     include_tagging=False, drop_invalid=True,
                 )
                 keep_mask = valid_z
             else:
-                # placeholder zeros -- never used in training for this
-                # population, but kept shape-consistent so batching works
-                n_scalars_z = 3
+                n_scalars_z = 4
                 features_z = torch.zeros((n_events, n_tokens, 4 + n_scalars_z))
                 mask_z = torch.zeros((n_events, n_tokens), dtype=torch.bool)
                 keep_mask = torch.ones(n_events, dtype=torch.bool)
@@ -407,11 +386,6 @@ class WWbbData(UnfoldingData):
             tensor_kwargs["z"].append(features_z)
             tensor_kwargs["mask_z"].append(mask_z)
 
-            # event weights (filtered consistently with keep_mask, and
-            # compensated for subsampling so relative normalization between
-            # populations is preserved regardless of num_sim/num_data).
-            # Defaults to unit weight if the weight branch isn't present
-            # (always true for real collision data).
             if has_weight:
                 w = ak.to_numpy(arrays[RECO_BRANCHES["weight"]]).astype(np.float32)
             else:
@@ -427,7 +401,6 @@ class WWbbData(UnfoldingData):
 
             batch_size += n_events
 
-        # NORMALIZATION
         if normalize:
             w_sim_raw, w_data_raw = raw_weights[0], raw_weights[1]
             sum_sim  = np.abs(w_sim_raw).sum()
@@ -461,15 +434,33 @@ class WWbbData(UnfoldingData):
 
 @tensorclass
 class WWbbTransform:
-    """Logit-transform GN2 tagging scores, then prepend Lorentz spurions."""
+    """
+    Log-transform the auxiliary jet-pt scalar, logit-transform the GN2
+    tagging scores (reco only), then prepend Lorentz spurions.
+
+    Scalar layout (index within the scalar block, starting at feature
+    index 4 in the full [E,px,py,pz, ...scalars] token vector):
+        reco (x):  [is_mu(4), is_met(5), is_jet(6), jet_pt(7),
+                     pb(8), pc(9), pu(10), ptau(11)]
+        truth (z): [is_mu(4), is_met(5), is_jet(6), jet_pt(7)]
+    """
 
     eps: float = 1e-6
+    eps_pt: float = 1e-3
 
     def forward(self, batch):
-        is_jet = batch.x[..., 6:7]
-        scores = batch.x[..., 7:11].clamp(self.eps, 1 - self.eps)
+        # ---- reco (x): log-transform jet_pt, logit-transform GN2 scores ----
+        is_jet_x = batch.x[..., 6:7]
+
+        batch.x[..., 7:8] = torch.log(batch.x[..., 7:8] + self.eps_pt) * is_jet_x
+
+        scores = batch.x[..., 8:12].clamp(self.eps, 1 - self.eps)
         logit_scores = torch.log(scores / (1 - scores))
-        batch.x[..., 7:11] = logit_scores * is_jet
+        batch.x[..., 8:12] = logit_scores * is_jet_x
+
+        # ---- truth (z): log-transform jet_pt only (no GN2 at truth level) ----
+        is_jet_z = batch.z[..., 6:7]
+        batch.z[..., 7:8] = torch.log(batch.z[..., 7:8] + self.eps_pt) * is_jet_z
 
         batch.x, batch.mask_x = LorentzTransform.forward(batch.x, mask=batch.mask_x)
         batch.z, batch.mask_z = LorentzTransform.forward(batch.z, mask=batch.mask_z)
@@ -482,41 +473,80 @@ class WWbbTransform:
 
 @dataclass
 class WWbbProcess:
-    num_features: int = 11
+    num_features: int = 12   # reco: 4 (4-vec) + 8 (scalars); NOTE: not used
+                              # for functional network sizing here -- L-GATr
+                              # in_v_channels/in_s_channels are set explicitly
+                              # in the model config, unlike WWbbMultiProcess
+                              # where this field drives the MLP's dim_in via
+                              # interpolation
     transforms: Tuple[Callable] = (WWbbTransform(),)
 
     observables_x: Tuple[Observable] = (
-        # ---- muon ----
+        # ================================================================
+        # BENCHMARK CROSS-CHECK OBSERVABLES -- identical name/definition/
+        # binning to WWbbMultiProcess's observables_x, so observables.pdf/
+        # metrics.pdf/iteration chi2-summary can be compared page-for-page
+        # between the L-GATr (wwbb) and MLP+Kernel (wwbb_multi) pipelines.
+        # ================================================================
         Observable(
             name="mu_pt",
             compute=lambda x: torch.sqrt(x[..., 0, 1] ** 2 + x[..., 0, 2] ** 2),
             label=r"$p_{T,\mu}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
         ),
+        Observable(
+            name="mu_e",
+            compute=lambda x: x[..., 0, 0],
+            label=r"$E_{\mu}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j1_pt",
+            compute=lambda x: torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2),
+            label=r"Leading jet $p_T$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j1_e",
+            compute=lambda x: x[..., 2, 0],
+            label=r"Leading jet $E$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j2_pt",
+            compute=lambda x: torch.sqrt(x[..., 3, 1] ** 2 + x[..., 3, 2] ** 2),
+            label=r"Subleading jet $p_T$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j2_e",
+            compute=lambda x: x[..., 3, 0],
+            label=r"Subleading jet $E$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j3_pt",
+            compute=lambda x: torch.sqrt(x[..., 4, 1] ** 2 + x[..., 4, 2] ** 2),
+            label=r"3rd jet $p_T$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j3_e",
+            compute=lambda x: x[..., 4, 0],
+            label=r"3rd jet $E$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+
+        # ================================================================
+        # EXISTING DIAGNOSTIC OBSERVABLES
+        # ================================================================
         Observable(
             name="mu_eta",
             compute=lambda x: torch.arctanh(
                 x[..., 0, 3] / torch.sqrt(x[..., 0, 1] ** 2 + x[..., 0, 2] ** 2 + x[..., 0, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"$\eta_{\mu}$",
-            xlims=(-5, 5),
-            log_bins=False,
-        ),
-        Observable(
-            name="mu_e",
-            compute=lambda x: x[..., 0, 0],
-            label=r"$E_{\mu}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- leading jet ----
-        Observable(
-            name="j1_pt",
-            compute=lambda x: torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2),
-            label=r"Leading jet $p_T$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            xlims=(-5, 5), log_bins=False,
         ),
         Observable(
             name="j1_eta",
@@ -524,23 +554,7 @@ class WWbbProcess:
                 x[..., 2, 3] / torch.sqrt(x[..., 2, 1] ** 2 + x[..., 2, 2] ** 2 + x[..., 2, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"Leading jet $\eta$",
-            xlims=(-5, 5),
-            log_bins=False,
-        ),
-        Observable(
-            name="j1_e",
-            compute=lambda x: x[..., 2, 0],
-            label=r"Leading jet $E$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- subleading jet ----
-        Observable(
-            name="j2_pt",
-            compute=lambda x: torch.sqrt(x[..., 3, 1] ** 2 + x[..., 3, 2] ** 2),
-            label=r"Subleading jet $p_T$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            xlims=(-5, 5), log_bins=False,
         ),
         Observable(
             name="j2_eta",
@@ -548,23 +562,7 @@ class WWbbProcess:
                 x[..., 3, 3] / torch.sqrt(x[..., 3, 1] ** 2 + x[..., 3, 2] ** 2 + x[..., 3, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"Subleading jet $\eta$",
-            xlims=(-5, 5),
-            log_bins=False,
-        ),
-        Observable(
-            name="j2_e",
-            compute=lambda x: x[..., 3, 0],
-            label=r"Subleading jet $E$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- third leading jet ----
-        Observable(
-            name="j3_pt",
-            compute=lambda x: torch.sqrt(x[..., 4, 1] ** 2 + x[..., 4, 2] ** 2),
-            label=r"3rd jet $p_T$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            xlims=(-5, 5), log_bins=False,
         ),
         Observable(
             name="j3_eta",
@@ -572,58 +570,79 @@ class WWbbProcess:
                 x[..., 4, 3] / torch.sqrt(x[..., 4, 1] ** 2 + x[..., 4, 2] ** 2 + x[..., 4, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"3rd jet $\eta$",
-            xlims=(-5, 5),
-            log_bins=False,
+            xlims=(-5, 5), log_bins=False,
         ),
-        Observable(
-            name="j3_e",
-            compute=lambda x: x[..., 4, 0],
-            label=r"3rd jet $E$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- MET (kept as a useful cross-check) ----
         Observable(
             name="met",
             compute=lambda x: x[..., 1, 0],
             label=r"$E_T^{\text{miss}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            qlims=(1e-3, 1 - 1e-3), log_bins=True,
         ),
     )
 
     observables_z: Tuple[Observable] = (
-        # ---- muon (truth) ----
+        # ================================================================
+        # BENCHMARK CROSS-CHECK OBSERVABLES (truth level)
+        # ================================================================
         Observable(
             name="mu_pt_truth",
             compute=lambda z: torch.sqrt(z[..., 0, 1] ** 2 + z[..., 0, 2] ** 2),
-            label=r"$p_{T,\mu}^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            label=r"$p_{T,\mu}^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
         ),
+        Observable(
+            name="mu_e_truth",
+            compute=lambda z: z[..., 0, 0],
+            label=r"$E_{\mu}^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j1_pt_truth",
+            compute=lambda z: torch.sqrt(z[..., 2, 1] ** 2 + z[..., 2, 2] ** 2),
+            label=r"Leading jet $p_T^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j1_e_truth",
+            compute=lambda z: z[..., 2, 0],
+            label=r"Leading jet $E^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j2_pt_truth",
+            compute=lambda z: torch.sqrt(z[..., 3, 1] ** 2 + z[..., 3, 2] ** 2),
+            label=r"Subleading jet $p_T^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j2_e_truth",
+            compute=lambda z: z[..., 3, 0],
+            label=r"Subleading jet $E^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j3_pt_truth",
+            compute=lambda z: torch.sqrt(z[..., 4, 1] ** 2 + z[..., 4, 2] ** 2),
+            label=r"3rd jet $p_T^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+        Observable(
+            name="j3_e_truth",
+            compute=lambda z: z[..., 4, 0],
+            label=r"3rd jet $E^{\rm truth}$ [GeV]",
+            qlims=(1e-3, 1 - 1e-3), logy=True, log_bins=True,
+        ),
+
+        # ================================================================
+        # EXISTING DIAGNOSTIC OBSERVABLES (truth level)
+        # ================================================================
         Observable(
             name="mu_eta_truth",
             compute=lambda z: torch.arctanh(
                 z[..., 0, 3] / torch.sqrt(z[..., 0, 1] ** 2 + z[..., 0, 2] ** 2 + z[..., 0, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"$\eta_{\mu}^{\text{truth}}$",
-            xlims=(-5, 5),
-            log_bins=False,
-        ),
-        Observable(
-            name="mu_e_truth",
-            compute=lambda z: z[..., 0, 0],
-            label=r"$E_{\mu}^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- leading jet (truth) ----
-        Observable(
-            name="j1_pt_truth",
-            compute=lambda z: torch.sqrt(z[..., 2, 1] ** 2 + z[..., 2, 2] ** 2),
-            label=r"Leading jet $p_T^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            xlims=(-5, 5), log_bins=False,
         ),
         Observable(
             name="j1_eta_truth",
@@ -631,23 +650,7 @@ class WWbbProcess:
                 z[..., 2, 3] / torch.sqrt(z[..., 2, 1] ** 2 + z[..., 2, 2] ** 2 + z[..., 2, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"Leading jet $\eta^{\text{truth}}$",
-            xlims=(-5, 5),
-            log_bins=False,
-        ),
-        Observable(
-            name="j1_e_truth",
-            compute=lambda z: z[..., 2, 0],
-            label=r"Leading jet $E^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- subleading jet (truth) ----
-        Observable(
-            name="j2_pt_truth",
-            compute=lambda z: torch.sqrt(z[..., 3, 1] ** 2 + z[..., 3, 2] ** 2),
-            label=r"Subleading jet $p_T^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            xlims=(-5, 5), log_bins=False,
         ),
         Observable(
             name="j2_eta_truth",
@@ -655,23 +658,7 @@ class WWbbProcess:
                 z[..., 3, 3] / torch.sqrt(z[..., 3, 1] ** 2 + z[..., 3, 2] ** 2 + z[..., 3, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"Subleading jet $\eta^{\text{truth}}$",
-            xlims=(-5, 5),
-            log_bins=False,
-        ),
-        Observable(
-            name="j2_e_truth",
-            compute=lambda z: z[..., 3, 0],
-            label=r"Subleading jet $E^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- third leading jet (truth) ----
-        Observable(
-            name="j3_pt_truth",
-            compute=lambda z: torch.sqrt(z[..., 4, 1] ** 2 + z[..., 4, 2] ** 2),
-            label=r"3rd jet $p_T^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            xlims=(-5, 5), log_bins=False,
         ),
         Observable(
             name="j3_eta_truth",
@@ -679,22 +666,12 @@ class WWbbProcess:
                 z[..., 4, 3] / torch.sqrt(z[..., 4, 1] ** 2 + z[..., 4, 2] ** 2 + z[..., 4, 3] ** 2).clamp(min=1e-8)
             ),
             label=r"3rd jet $\eta^{\text{truth}}$",
-            xlims=(-5, 5),
-            log_bins=False,
+            xlims=(-5, 5), log_bins=False,
         ),
-        Observable(
-            name="j3_e_truth",
-            compute=lambda z: z[..., 4, 0],
-            label=r"3rd jet $E^{\text{truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
-        ),
-        # ---- MET (truth) ----
         Observable(
             name="met_truth",
             compute=lambda z: z[..., 1, 0],
             label=r"$E_T^{\text{miss,truth}}$ [GeV]",
-            qlims=(1e-3, 1 - 1e-3),
-            log_bins=True,
+            qlims=(1e-3, 1 - 1e-3), log_bins=True,
         ),
     )
