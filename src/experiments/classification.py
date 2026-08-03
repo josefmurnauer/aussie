@@ -11,7 +11,11 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from src.experiments.training import TrainingExperiment
-from src.utils.metrics import compute_observable_metrics, save_metrics_pdf
+from src.utils.metrics import (
+    compute_observable_metrics,
+    save_metrics_pdf,
+    _flatten_metrics_dict,
+)
 
 
 class ClassificationExperiment(TrainingExperiment):
@@ -346,6 +350,8 @@ class ClassificationExperiment(TrainingExperiment):
             name_sim="MC Simulation Pythia",
         )
 
+        metrics_to_save = {"observables_x": {"names": obs_names_x, **metrics_x}}
+
         with PdfPages(os.path.join(savedir, "metrics.pdf")) as pdf:
             save_metrics_pdf(pdf, obs_names_x, metrics_x, prefix="Reco-level: ")
 
@@ -359,3 +365,12 @@ class ClassificationExperiment(TrainingExperiment):
                     name_sim="MC Simulation Pythia",
                 )
                 save_metrics_pdf(pdf, obs_names_z, metrics_z, prefix="Truth-level: ")
+                metrics_to_save["observables_z"] = {"names": obs_names_z, **metrics_z}
+
+        # save raw metric values (not just the PDF) so downstream tools
+        # (e.g. benchmark comparison scripts, IterationExperiment summary)
+        # can aggregate across many runs without re-running inference
+        np.savez(
+            os.path.join(savedir, "metrics.npz"),
+            **_flatten_metrics_dict(metrics_to_save),
+        )
