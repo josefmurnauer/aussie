@@ -134,30 +134,28 @@ def _met_to_cartesian(met, met_phi):
     return np.stack([met, px, py, np.zeros_like(met)], axis=-1)
 
 
-def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_invalid=False):
-    """Build (features, mask, valid) for one event collection at one level
-    (reco/truth).
+def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging=False, drop_invalid=False):
+    """Build (features, mask, valid) for one event collection at one
+    level (reco/truth).
 
     Token layout: [muon, met, jet_0, ..., jet_{max_jets-1}]
-    Feature layout:
-        [E, px, py, pz, is_mu, is_met, is_jet, jet_pt, (tagging scores...)]
+    Feature layout: [E, px, py, pz, is_mu, is_met, is_jet]
 
-    `jet_pt` is included as an auxiliary SCALAR channel (in addition to
-    being part of the 4-vector), analogous to how the GN2 tagging scores
-    are provided -- giving the network direct access to the magnitude
-    without needing to reconstruct it from the geometric input. It is
-    zero for non-jet tokens (muon, MET, padded jet slots), matching the
-    zero-padding convention used for the GN2 scores.
+    Only the one-hot token-TYPE flags are kept as scalar auxiliary
+    channels. No pT scalar and no GN2 tagging scores are included --
+    `include_tagging` is accepted for call-site backward compatibility
+    but is IGNORED.
 
-    All pt/energy quantities are converted from MeV (raw ntuple units) to
-    GeV.
+    All pt/energy quantities are converted from MeV (raw ntuple units)
+    to GeV.
 
     Some branches (most notably particle-level muon kinematics) can
-    contain NaN for a small fraction of events -- e.g. when the truth-level
-    lepton isn't actually a muon. `valid` marks events where ALL features
-    are finite.
+    contain NaN for a small fraction of events -- e.g. when the
+    truth-level lepton isn't actually a muon. `valid` marks events where
+    ALL features are finite.
     """
     n_tokens = 2 + max_jets
+    n_scalars = 3  # is_mu, is_met, is_jet
 
     mu_pt  = _get_object_field(arrays, branch_map["mu_pt"], scale=MEV_TO_GEV)
     mu_eta = _get_object_field(arrays, branch_map["mu_eta"])
@@ -172,9 +170,8 @@ def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_
     assert met_4vec.shape == (n_events, 4), f"met_4vec shape mismatch: {met_4vec.shape}"
 
     n_jets = ak.num(arrays[branch_map["jet_pt"]]).to_numpy()
-    jets_pt_padded = _pad(arrays[branch_map["jet_pt"]], max_jets, scale=MEV_TO_GEV)
     jets_4vec = _to_cartesian(
-        jets_pt_padded,
+        _pad(arrays[branch_map["jet_pt"]], max_jets, scale=MEV_TO_GEV),
         _pad(arrays[branch_map["jet_eta"]], max_jets),
         _pad(arrays[branch_map["jet_phi"]], max_jets),
         _pad(arrays[branch_map["jet_e"]], max_jets, scale=MEV_TO_GEV),
@@ -188,31 +185,11 @@ def _build_tokens(arrays, branch_map, max_jets, n_events, include_tagging, drop_
     momenta[:, 1] = met_4vec
     momenta[:, 2:] = jets_4vec
 
-    if include_tagging:
-        pb   = _pad(arrays[branch_map["jet_gn2_pb"]], max_jets)
-        pc   = _pad(arrays[branch_map["jet_gn2_pc"]], max_jets)
-        pu   = _pad(arrays[branch_map["jet_gn2_pu"]], max_jets)
-        ptau = _pad(arrays[branch_map["jet_gn2_ptau"]], max_jets)
-
-        # scalar layout: [is_mu, is_met, is_jet, jet_pt, pb, pc, pu, ptau]
-        n_scalars = 4 + N_JET_TAGGING_SCORES
-        scalars = np.zeros((n_events, n_tokens, n_scalars), dtype=np.float32)
-        scalars[:, 0, 0] = 1.0
-        scalars[:, 1, 1] = 1.0
-        scalars[:, 2:, 2] = 1.0
-        scalars[:, 2:, 3] = jets_pt_padded
-        scalars[:, 2:, 4] = pb
-        scalars[:, 2:, 5] = pc
-        scalars[:, 2:, 6] = pu
-        scalars[:, 2:, 7] = ptau
-    else:
-        # scalar layout: [is_mu, is_met, is_jet, jet_pt]
-        n_scalars = 4
-        scalars = np.zeros((n_events, n_tokens, n_scalars), dtype=np.float32)
-        scalars[:, 0, 0] = 1.0
-        scalars[:, 1, 1] = 1.0
-        scalars[:, 2:, 2] = 1.0
-        scalars[:, 2:, 3] = jets_pt_padded
+    # scalar layout: [is_mu, is_met, is_jet]
+    scalars = np.zeros((n_events, n_tokens, n_scalars), dtype=np.float32)
+    scalars[:, 0, 0] = 1.0
+    scalars[:, 1, 1] = 1.0
+    scalars[:, 2:, 2] = 1.0
 
     features = np.concatenate([momenta, scalars], axis=-1)
 
@@ -364,8 +341,7 @@ class WWbbData(UnfoldingData):
                 )
                 keep_mask = valid_z
             else:
-                n_scalars_z = 4
-                features_z = torch.zeros((n_events, n_tokens, 4 + n_scalars_z))
+                features_z = torch.zeros((n_events, n_tokens, 4 + 3))  # 4-vec + is_mu/is_met/is_jet
                 mask_z = torch.zeros((n_events, n_tokens), dtype=torch.bool)
                 keep_mask = torch.ones(n_events, dtype=torch.bool)
 
@@ -435,32 +411,32 @@ class WWbbData(UnfoldingData):
 @tensorclass
 class WWbbTransform:
     """
-    Log-transform the auxiliary jet-pt scalar, logit-transform the GN2
-    tagging scores (reco only), then prepend Lorentz spurions.
+    Preprocessing for the token-based WWbb features with a minimal
+    scalar block: [E, px, py, pz, is_mu, is_met, is_jet].
 
-    Scalar layout (index within the scalar block, starting at feature
-    index 4 in the full [E,px,py,pz, ...scalars] token vector):
-        reco (x):  [is_mu(4), is_met(5), is_jet(6), jet_pt(7),
-                     pb(8), pc(9), pu(10), ptau(11)]
-        truth (z): [is_mu(4), is_met(5), is_jet(6), jet_pt(7)]
+    Applies a GLOBAL EQUIVARIANT RESCALE of the four-momenta
+    (E, px, py, pz) by a single scalar `scale_p`. Dividing all four
+    components by the SAME constant preserves Lorentz-covariance
+    exactly (a Lorentz boost/rotation commutes with scalar
+    multiplication: Lambda(x / s) = (Lambda x) / s), while bringing raw
+    GeV-scale momenta down to an O(1) numerical range -- matching the
+    O(1) scale of the fixed beam spurions injected by LorentzTransform.
+
+    The one-hot type flags (is_mu, is_met, is_jet) are already {0, 1}
+    and need no further standardization.
+
+    NOTE: scale_p below is a PLACEHOLDER. Run compute_shift_scale() once
+    on your sim data and paste the printed value into WWbbProcess before
+    training.
     """
 
-    eps: float = 1e-6
-    eps_pt: float = 1e-3
+    scale_p: float = 50.0
 
     def forward(self, batch):
-        # ---- reco (x): log-transform jet_pt, logit-transform GN2 scores ----
-        is_jet_x = batch.x[..., 6:7]
 
-        batch.x[..., 7:8] = torch.log(batch.x[..., 7:8] + self.eps_pt) * is_jet_x
-
-        scores = batch.x[..., 8:12].clamp(self.eps, 1 - self.eps)
-        logit_scores = torch.log(scores / (1 - scores))
-        batch.x[..., 8:12] = logit_scores * is_jet_x
-
-        # ---- truth (z): log-transform jet_pt only (no GN2 at truth level) ----
-        is_jet_z = batch.z[..., 6:7]
-        batch.z[..., 7:8] = torch.log(batch.z[..., 7:8] + self.eps_pt) * is_jet_z
+        # global equivariant rescale of four-momenta
+        batch.x[..., :4] = batch.x[..., :4] / self.scale_p
+        batch.z[..., :4] = batch.z[..., :4] / self.scale_p
 
         batch.x, batch.mask_x = LorentzTransform.forward(batch.x, mask=batch.mask_x)
         batch.z, batch.mask_z = LorentzTransform.forward(batch.z, mask=batch.mask_z)
@@ -470,6 +446,68 @@ class WWbbTransform:
     def reverse(self, batch):
         raise NotImplementedError
 
+# ----------------------------------------------------------------------------
+# Utility: compute scale_p / shift / scale from your sim data
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Utility: compute scale_p from your sim data
+# ----------------------------------------------------------------------------
+
+def compute_shift_scale(
+    path_sim: str,
+    max_jets: int = 3,
+    num: Optional[int] = None,
+    seed: int = 42,
+):
+    """
+    Compute, from the sim parquet files, the RMS four-momentum-component
+    magnitude over all valid (non-padded) tokens -- used as the global
+    equivariant rescale `scale_p` of (E, px, py, pz).
+
+    Usage:
+        python -c "
+        from src.datasets.wwbb import compute_shift_scale
+        compute_shift_scale('/scratch/mjosef/Unfolding/aussie/data/sim', num=2_000_000)
+        "
+    """
+    paths = _resolve_paths(path_sim)
+    available = _available_columns(paths)
+    has_truth = all(b in available for b in PARTICLE_BRANCHES.values())
+    assert has_truth, "compute_shift_scale requires a sim sample with particle-level truth"
+
+    columns = _needed_columns(RECO_BRANCHES, include_weight=False)
+    columns += _needed_columns(PARTICLE_BRANCHES)
+    columns = list(dict.fromkeys(columns))
+
+    arrays, _ = _load_arrays(paths, columns, num=num, seed=seed)
+    n_events = len(arrays)
+
+    features_x, mask_x, _ = _build_tokens(
+        arrays, RECO_BRANCHES, max_jets, n_events, drop_invalid=False,
+    )
+    features_z, mask_z, valid_z = _build_tokens(
+        arrays, PARTICLE_BRANCHES, max_jets, n_events, drop_invalid=True,
+    )
+
+    n_dropped = (~valid_z).sum().item()
+    if n_dropped > 0:
+        print(f"Dropping {n_dropped} / {n_events} events with invalid truth muon "
+              f"before computing statistics")
+
+    features_x = features_x[valid_z]
+    mask_x = mask_x[valid_z]
+    features_z = torch.nan_to_num(features_z[valid_z], nan=0.0)
+    mask_z = mask_z[valid_z]
+
+    vec_x = features_x[..., :4][mask_x]
+    vec_z = features_z[..., :4][mask_z]
+    scale_p = torch.sqrt(torch.cat([vec_x, vec_z]).pow(2).mean()).item()
+
+    print("Paste into WWbbProcess:\n")
+    print(f"  scale_p={scale_p:.4f},")
+
+    return scale_p
 
 @dataclass
 class WWbbProcess:
@@ -479,7 +517,11 @@ class WWbbProcess:
                               # in the model config, unlike WWbbMultiProcess
                               # where this field drives the MLP's dim_in via
                               # interpolation
-    transforms: Tuple[Callable] = (WWbbTransform(),)
+    transforms: Tuple[Callable] = (
+        WWbbTransform(
+            scale_p=226.4290,
+        ),
+    )
 
     observables_x: Tuple[Observable] = (
         # ================================================================
