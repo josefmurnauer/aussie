@@ -1,0 +1,10 @@
+run_name: tunfold_${dataset.name}
+experiment: TUnfoldExperiment
+
+tunfold:
+  num_bins_truth: ${plotting.num_bins}
+  reco_bin_factor: 2
+  clip_negative: true
+
+defaults:
+  - default
