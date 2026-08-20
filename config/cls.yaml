@@ -17,7 +17,7 @@ training:
   lr: 1e-3
   epochs: 500
   batch_size: 1024
-  patience: 10
+  patience: 30
   optimizer:
     weight_decay: 0.0
 

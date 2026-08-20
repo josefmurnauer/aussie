@@ -5,7 +5,7 @@ plots/
 .zshrc
 data/
 Miniforge3.sh
-
+*.pdf
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

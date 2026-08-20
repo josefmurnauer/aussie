@@ -1,7 +1,7 @@
 run_name: iterate_${dataset.name}
 experiment: IterationExperiment
 
-iterations: 5
+iterations: 20
 cls_path: null
 prev_it_path: null
 warm_start_unf: false
