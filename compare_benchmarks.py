@@ -1,13 +1,14 @@
 """
 Standalone comparison script for the wwbb (L-GATr) vs wwbb_multi
 (MLP+Kernel) benchmark sweep. Reads cached metrics.npz files (produced
-by ClassificationExperiment.plot() / UnfoldingExperiment.plot()) --
-no dataset reloading or model inference needed.
+by ClassificationExperiment.plot() / UnfoldingExperiment.plot() /
+TUnfoldExperiment.run()) -- no dataset reloading or model inference
+needed.
 
 Usage:
     python compare_benchmarks.py
-(edit RUNS_UNFOLDING / RUNS_ITERATION below to match your actual run
-directory names)
+(edit RUNS_UNFOLDING / RUNS_ITERATION / RUNS_TUNFOLD below to match your
+actual run directory names)
 """
 
 import glob
@@ -43,6 +44,21 @@ RUNS_ITERATION = {
     "bench_xlarge":             "itr_wwbb_bench_xlarge/2026-07-30_14-56-18",
     "bench_medium_notag":       "itr_wwbb_bench_medium_notag/2026-07-31_09-15-59",
 }
+
+# TUnfoldExperiment runs -- one per underlying dataset. TUnfold has no
+# network/capacity dependence, so a single run per dataset serves as a
+# shared reference line across ALL bench_* variants of that dataset
+# (edit these paths to match your actual `tun/wwbb` and `tun/wwbb_multi`
+# run directories, produced via:
+#   python aussie.py --config-name tun/wwbb
+#   python aussie.py --config-name tun/wwbb_multi
+# )
+RUNS_TUNFOLD = {
+    "wwbb":       "tunfold_wwbb/2026-08-12_10-23-20",
+    #"wwbb_multi": "tunfold_wwbb_multi/2026-08-01_00-00-00",
+}
+
+TUNFOLD_COLORS = {"wwbb": "#B22222"} #, "wwbb_multi": "#8B4513"}
 
 BENCHMARK_OBS_X = ["mu_pt", "mu_e", "j1_pt", "j1_e", "j2_pt", "j2_e", "j3_pt", "j3_e"]
 BENCHMARK_OBS_Z = [f"{n}_truth" for n in BENCHMARK_OBS_X]
@@ -110,6 +126,57 @@ def _last_available_metrics(exp_dir):
 
 
 # ----------------------------------------------------------------------------
+# TUnfold reference-line helpers
+# ----------------------------------------------------------------------------
+
+def _variant_dataset_key(variant_name):
+    """Map a variant display name to the underlying dataset it uses, so
+    the correct TUnfold reference (wwbb vs wwbb_multi) is drawn. All
+    "bench_*" variants use the wwbb (L-GATr) dataset; anything mentioning
+    "multi" uses wwbb_multi."""
+    return "wwbb_multi" if "multi" in variant_name.lower() else "wwbb"
+
+
+_tunfold_cache = {}
+
+
+def _load_tunfold_metrics(dataset_key):
+    if dataset_key in _tunfold_cache:
+        return _tunfold_cache[dataset_key]
+
+    rel_path = RUNS_TUNFOLD.get(dataset_key)
+    data = None
+    if rel_path is not None:
+        npz_path = os.path.join(RUNS_DIR, rel_path, "plots", "metrics.npz")
+        data = _load_metrics_npz(npz_path)
+        print(f"TUnfold [{dataset_key}]: {'OK' if data is not None else 'MISSING metrics.npz'}")
+
+    _tunfold_cache[dataset_key] = data
+    return data
+
+
+def _tunfold_mean(dataset_key, metric_name, obs_filter):
+    data = _load_tunfold_metrics(dataset_key)
+    if data is None:
+        return np.nan
+    return _mean_over_filter(data, "observables_z", metric_name, "TUnfold", obs_filter)
+
+
+def _add_tunfold_hlines(ax, variant_names, metric_name, obs_filter):
+    """Draw one dashed horizontal reference line per unique dataset
+    represented among variant_names (deduplicated, since e.g. all
+    bench_* variants share the same "wwbb" TUnfold reference)."""
+    dataset_keys = sorted(set(_variant_dataset_key(v) for v in variant_names))
+    for dk in dataset_keys:
+        tval = _tunfold_mean(dk, metric_name, obs_filter)
+        if np.isfinite(tval):
+            ax.axhline(
+                tval, color=TUNFOLD_COLORS.get(dk, "brown"), linestyle=":",
+                linewidth=1.5, zorder=5, label=f"TUnfold ({dk}) ({tval:.3g})",
+            )
+
+
+# ----------------------------------------------------------------------------
 # Part 1: single-shot unfolding comparison (bar charts)
 # ----------------------------------------------------------------------------
 
@@ -158,7 +225,12 @@ def build_unfolding_comparison(runs_dict, out_path):
 
                 if hline is not None:
                     ax.axhline(hline, color="black", linestyle="--", linewidth=1.2,
-                               label=f"Optimum ({hline:g})")
+                               label=f" ({hline:g})")
+
+                # TUnfold reference -- truth level only (TUnfold produces no
+                # meaningful reco-level curve)
+                if level == "observables_z":
+                    _add_tunfold_hlines(ax, variant_names, metric_name, obs_filter)
 
                 ax.set_xticks(x)
                 ax.set_xticklabels(variant_names, rotation=30, ha="right", fontsize=9)
@@ -181,6 +253,8 @@ def build_unfolding_comparison(runs_dict, out_path):
 # ----------------------------------------------------------------------------
 
 def _add_iteration_lineplots(pdf, runs_dict):
+    variant_names = list(runs_dict.keys())
+
     for level, obs_filter, level_label in (
         ("observables_x", BENCHMARK_OBS_X, "Reco-level"),
         ("observables_z", BENCHMARK_OBS_Z, "Truth-level"),
@@ -222,7 +296,11 @@ def _add_iteration_lineplots(pdf, runs_dict):
 
             if hline is not None:
                 ax.axhline(hline, color="black", linestyle="--", linewidth=1.0,
-                           label=f"Optimum ({hline:g})")
+                           label=f" ({hline:g})")
+
+            # TUnfold reference -- truth level only
+            if level == "observables_z":
+                _add_tunfold_hlines(ax, variant_names, metric_name, obs_filter)
 
             ax.set_xlabel("Iteration", fontsize=11)
             ax.set_ylabel(f"Mean {ylabel} (AUSSIE, 8 benchmark observables)", fontsize=10)
@@ -286,7 +364,11 @@ def _add_iteration_final_barplots(pdf, runs_dict):
 
             if hline is not None:
                 ax.axhline(hline, color="black", linestyle="--", linewidth=1.2,
-                           label=f"Optimum ({hline:g})")
+                           label=f" ({hline:g})")
+
+            # TUnfold reference -- truth level only
+            if level == "observables_z":
+                _add_tunfold_hlines(ax, variant_names, metric_name, obs_filter)
 
             # annotate each variant's group with which iteration was used,
             # since variants may have stopped at different iteration counts

@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, random_split
 from src.experiments.base_experiment import BaseExperiment
 from src.datasets import UnfoldingData
 from src.utils.trainer import Trainer
+from src.utils.replica import attach_replica_bootstrap
 
 
 class TrainingExperiment(BaseExperiment):
@@ -16,6 +17,26 @@ class TrainingExperiment(BaseExperiment):
 
         # preprocessing and observables
         self.process = instantiate(self.cfg.dataset.process)
+
+        # sanity check for replica bootstrap configuration, if enabled --
+        # a K mismatch between replica_bootstrap.n_replicas and
+        # model.net.ensembled would otherwise surface only as a cryptic
+        # shape-mismatch RuntimeError deep inside Classifier.batch_loss
+        if (rcfg := self.cfg.get("replica_bootstrap", None)) is not None and rcfg.enabled:
+            net_ensembled = self.cfg.model.net.get("ensembled", None)
+            if net_ensembled != rcfg.n_replicas:
+                raise ValueError(
+                    f"replica_bootstrap.enabled=true requires "
+                    f"model.net.ensembled ({net_ensembled}) to equal "
+                    f"replica_bootstrap.n_replicas ({rcfg.n_replicas})."
+                )
+            self.log.info(
+                f"Replica bootstrap ENABLED: n_replicas={rcfg.n_replicas}, "
+                f"seed={rcfg.seed}. Training K={rcfg.n_replicas} ensemble "
+                f"members, each on an independent Poisson(1) bootstrap "
+                f"draw of the data/pseudodata population, for genuine "
+                f"data statistical uncertainty estimation."
+            )
 
         if self.cfg.train:
 
@@ -116,6 +137,17 @@ class TrainingExperiment(BaseExperiment):
         # preprocess (on cpu)
         for transform in self.process.transforms:
             dset = transform.forward(dset)
+
+        # optionally attach per-replica bootstrap weights (data population
+        # only) for K-way ensembled data statistical uncertainty -- BEFORE
+        # the train/val/test split, so each split subset carries a
+        # consistent, correctly-indexed slice of the (N, K) weight tensor
+        if (rcfg := self.cfg.get("replica_bootstrap", None)) is not None and rcfg.enabled:
+            dset = attach_replica_bootstrap(
+                dset, rcfg.n_replicas, rcfg.seed, log=self.log,
+                distribution=rcfg.get("distribution", "poisson"),
+                lognormal_sigma=rcfg.get("lognormal_sigma", 1.0),
+            )
 
         # optionally move dataset to gpu
         on_gpu = dcfg.on_gpu and self.cfg.use_gpu

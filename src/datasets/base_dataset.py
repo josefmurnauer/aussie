@@ -26,6 +26,7 @@ class UnfoldingData:
     labels: Optional[torch.Tensor] = None
     conds: Optional[torch.Tensor] = None
     sample_logweights: Optional[torch.Tensor] = None
+    replica_weights: Optional[torch.Tensor] = None
 
     @classmethod
     @abstractmethod

@@ -10,7 +10,14 @@ model:
   net:
     dim_in: ${dataset.process.num_features}
     dim_out: 1
-    ensembled: false
+    ensembled: 60
+
+replica_bootstrap:
+  enabled: true
+  n_replicas: 60
+  seed: 0
+  distribution: lognormal
+  lognormal_sigma: 1.0
 
 training:
   batch_size: 1024

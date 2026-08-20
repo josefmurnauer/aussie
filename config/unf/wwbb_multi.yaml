@@ -5,10 +5,24 @@ defaults:
   - _self_
 
 model:
+  joint_ensembling: true
   net:
     dim_in: ${dataset.process.num_features}
     dim_out: 1
-    ensembled: false
+    ensembled: 60
+
+replica_bootstrap:
+  enabled: true
+  n_replicas: 60
+  seed: 0
+  distribution: lognormal
+  lognormal_sigma: 1.0
+  
+uncertainty:
+  enabled: true
+  n_boot: 200
+  seed: 0
+  control_exp_dir: null
 
 training:
   lr: 5e-3

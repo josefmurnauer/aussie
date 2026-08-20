@@ -49,6 +49,21 @@ class Classifier(Model):
             loss_dat = loss_dat * sample_weights[~mask_sim]
             loss_sim = loss_sim * sample_weights[mask_sim]
 
+        # ------------------------------------------------------------------
+        # Per-replica bootstrap weight (see src.utils.replica.
+        # attach_replica_bootstrap): only meaningful/present when training
+        # a K-way ENSEMBLED classifier for data statistical uncertainty
+        # estimation via replicas. Shape (N, K) -> (K, N) to align with the
+        # ensemble dimension already present in `logits` (added via
+        # StackedLinear's leading ensemble axis, see MLP.forward). Weight
+        # is exactly 1.0 for sim events (labels==0) for every replica --
+        # only the data population is bootstrap-varied per replica.
+        # ------------------------------------------------------------------
+        if batch.replica_weights is not None:
+            replica_w = batch.replica_weights.transpose(0, 1)  # (K, N)
+            loss_dat = loss_dat * replica_w[..., ~mask_sim]
+            loss_sim = loss_sim * replica_w[..., mask_sim]
+
         # average loss
         mean_dims = (0, 1) if self.ensembled else 0
         loss = (loss_dat.mean(mean_dims) + loss_sim.mean(mean_dims)) / 2
